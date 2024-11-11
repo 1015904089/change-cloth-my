@@ -65,11 +65,12 @@ class Trainer_SDS(object):
         # embed_fn = os.path.join(pc_dir, 'embedding.json')
         # self.model.load_from_embedding(embed_fn)
         # self.model.update_to_posed_mesh(cano_mesh)
-        mesh = trimesh.load('/home/jian/ISP/tmp/fitting/1/layer_bottom_000.obj')
+        # mesh = trimesh.load('/home/jian/ISP/tmp/fitting/1/layer_bottom_000.obj')
         mesh = draping(dataset,)
         self.model.create_from_mesh(mesh)
         self.model.update_to_cano_mesh()
-
+        self.model.init_human_model()
+        self.model.create_human_model(pc_dir, cano_mesh)
         self.gs_optim = SplattingAvatarOptimizer(self.model, self.opt)
 
         self.bg_color = torch.zeros(3).to(self.device)
@@ -129,8 +130,8 @@ class Trainer_SDS(object):
 
         self.valid_loader = valid_loader
 
-        self.model.xyz_gradient_accum = torch.zeros((self.model.get_xyz.shape[0], 1), device="cuda")
-        self.model.denom = torch.zeros((self.model.get_xyz.shape[0], 1), device="cuda")
+        self.model.xyz_gradient_accum = torch.zeros((self.model.num_cloth_gauss, 1), device="cuda")
+        self.model.denom = torch.zeros((self.model.num_cloth_gauss, 1), device="cuda")
 
         if self.use_tensorboardX :
             self.writer = tensorboardX.SummaryWriter(os.path.join(self.workspace, "run", ))
@@ -204,7 +205,7 @@ class Trainer_SDS(object):
             # pred_rgb.retain_grad()
             loss.backward()
 
-            self.gs_optim.adaptive_density_control(output_list, self.global_step)
+            # self.gs_optim.adaptive_density_control(output_list, self.global_step)
 
             self.gs_optim.step()
             self.gs_optim.zero_grad(set_to_none=True)
@@ -232,7 +233,7 @@ class Trainer_SDS(object):
         # cloth_mask
         human_pred = pred_rgb * (cloth_mask < 0.5)
         rgbs = ori_rgb
-        loss = l1_loss(human_pred, rgbs)
+        # loss = l1_loss(pred_rgb, rgbs)
 
         # cloth = Cloth_from_NP(mesh_atlas_sewing.vertices, mesh_atlas_sewing.faces, self.material)
 
@@ -241,7 +242,7 @@ class Trainer_SDS(object):
         # loss_gravity = gravitational_energy(self.model.get_xyz.unsqueeze(0), cloth.v_mass)
 
 
-        return loss,outputs
+        # return loss,outputs
 
         loss = self.guidance.train_step(pred_rgb=pred_rgb, cloth_f=cloth_f,
                                         cloth_b=cloth_b,

@@ -91,8 +91,8 @@ class SplattingAvatarOptimizer(LossBase):
             })
 
         self.optimizer = torch.optim.Adam(l, lr=5e-4, eps=1e-15)
-        model.xyz_gradient_accum = torch.zeros((model.get_xyz.shape[0], 1), device='cuda')
-        model.denom = torch.zeros((model.get_xyz.shape[0], 1), device='cuda')
+        model.xyz_gradient_accum = torch.zeros((model._xyz.shape[0], 1), device='cuda')
+        model.denom = torch.zeros((model._xyz.shape[0], 1), device='cuda')
         model.percent_dense = getattr(optimizer_config, 'percent_dense', 0.01)
         model.optimizer = self.optimizer
 

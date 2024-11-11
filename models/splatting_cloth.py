@@ -25,7 +25,7 @@ from models.gauss_base import GaussianBase
 class SplattingClothModel(GaussianBase):
     def __init__(self, config,
                  device=torch.device('cuda'),
-                 verbose=False):
+                 verbose=False,):
         super().__init__()
         self.config = config
         self.device = device
@@ -45,58 +45,73 @@ class SplattingClothModel(GaussianBase):
         if config is not None:
             self.setup_config(config)
 
+
     ##################################################
     @property
     def num_gauss(self):
-        return self._xyz.shape[0]
+        return self._features_dc.shape[0] + self.human_model.num_gauss
+    @property
+    def num_cloth_gauss(self):
+        return self._features_dc.shape[0]
+
+
 
     @property
     def get_xyz_cano(self):
         if self.config.xyz_as_uvd:
             # uv -> self.sample_bary -> self.base_normal --(d)--> xyz
-            xyz = self.base_normal_cano * self._xyz[..., -1:]
-            return self.base_xyz_cano + xyz
+            xyz = self.base_normal_cano * self.from_xyz[..., -1:]
+            _xyz = self.base_xyz_cano + xyz
         else:
-            return self._xyz
-
+            _xyz = self.from_xyz
+        return torch.cat((self.human_model.get_xyz_cano, _xyz), dim=0)
     @property
     def get_xyz(self):
         if self.config.xyz_as_uvd:
             # uv -> self.sample_bary -> self.base_normal --(d)--> xyz
-            xyz = self.base_normal * self._xyz[..., -1:] # self.base_normal.norm(dim=1) = [1,1,1,1,1....]
-            return self.base_xyz + xyz
+            xyz = self.base_normal * self._xyz_form_mesh_verts[..., -1:] # self.base_normal.norm(dim=1) = [1,1,1,1,1....]
+            _xyz= self.base_xyz + xyz
         else:
-            return self._xyz
+            _xyz= self._xyz_form_mesh_verts
+        return torch.cat((self.human_model.get_xyz, _xyz), dim=0)
+
+    @property
+    def _xyz_form_mesh_verts(self):
+        return thf.normalize(retrieve_verts_barycentric(self._xyz, self.cano_faces,     # 优化参数xyz插值
+                                   self.sample_fidxs, self.sample_bary),
+                             dim=-1)
 
     @property
     def base_normal_cano(self):
-        return thf.normalize(retrieve_verts_barycentric(self.cano_norms, self.cano_faces,
+        return thf.normalize(retrieve_verts_barycentric(self.cano_norms, self.cano_faces,   # 第一帧point插值
                                                         self.sample_fidxs, self.sample_bary),
                              dim=-1)
 
     @property
     def base_normal(self):
-        return thf.normalize(retrieve_verts_barycentric(self.mesh_norms, self.cano_faces,
+        return thf.normalize(retrieve_verts_barycentric(self.mesh_norms, self.cano_faces,   # 原始的mesh 法向插值
                                                         self.sample_fidxs, self.sample_bary),
                              dim=-1)
 
     @property
     def base_xyz_cano(self):
-        return retrieve_verts_barycentric(self.cano_verts, self.cano_faces,
+        return retrieve_verts_barycentric(self.cano_verts, self.cano_faces,         # 第一帧图片的point插值
                                           self.sample_fidxs, self.sample_bary)
 
     @property
     def base_xyz(self):
-        return retrieve_verts_barycentric(self.mesh_verts, self.cano_faces,
+        return retrieve_verts_barycentric(self.mesh_verts, self.cano_faces,             # 原始的mesh point插值
                                           self.sample_fidxs, self.sample_bary)
 
     @property
     def get_rotation_cano(self):
-        return self.rotation_activation(self._rotation)
+        _rotation = self.rotation_activation(self._rotation)
+        return torch.cat((self.human_model.get_rotation_cano, _rotation), dim=0)
 
     @property
     def get_rotation(self):
-        return self.rotation_activation(quaternion_multiply(self.base_quat, self._rotation))
+        _rotation =  self.rotation_activation(quaternion_multiply(self.base_quat, self._rotation))
+        return torch.cat((self.human_model.get_rotation, _rotation), dim=0)
 
     @property
     def get_rotation_embed(self):
@@ -108,29 +123,33 @@ class SplattingClothModel(GaussianBase):
 
     @property
     def get_scaling_cano(self):
-        return self.scaling_activation(self._scaling)
+        _scaling = self.scaling_activation(self._scaling)
+        return torch.cat((self.human_model.get_scaling_cano, _scaling), dim=0)
 
     @property
     def get_scaling(self):
         if self.config.with_mesh_scaling:
             scaling_alter = self._face_scaling[self.sample_fidxs]
-            return self.scaling_activation(self._scaling * scaling_alter)
+            _scaling = self.scaling_activation(self._scaling * scaling_alter)
         else:
-            return self.scaling_activation(self._scaling)
+            _scaling = self.scaling_activation(self._scaling)
+        return torch.cat((self.human_model.get_scaling, _scaling), dim=0)
 
     @property
     def get_features(self):
         features_dc = self._features_dc
         features_rest = self._features_rest
-        return torch.cat((features_dc, features_rest), dim=1)
+        _features = torch.cat((features_dc, features_rest), dim=1)
+        return torch.cat((self.human_model.get_features, _features), dim=0)
 
     @property
     def get_opacity(self):
-        return self.opacity_activation(self._opacity)
+        _opacity = self.opacity_activation(self._opacity)
+        return torch.cat((self.human_model.get_opacity, _opacity), dim=0)
 
     def get_params(self, device='cpu'):
         return {
-            '_xyz': self._xyz.detach().to(device),
+            '_xyz': self._xyz.detach().to(device),# mesh_v
             '_rotation': self._rotation.detach().to(device),
             '_scaling': self._scaling.detach().to(device),
             '_features_dc': self._features_dc.detach().to(device),
@@ -140,7 +159,7 @@ class SplattingClothModel(GaussianBase):
     def capture(self):
         return (
             self.active_sh_degree,
-            self._xyz,
+            self._xyz,# mesh_v
             self._features_dc,
             self._features_rest,
             self._scaling,
@@ -163,7 +182,7 @@ class SplattingClothModel(GaussianBase):
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         l = [
-            {'params': [self._xyz], 'lr': training_args.position_lr_init, "name": "xyz"},
+            {'params': [self._xyz], 'lr': training_args.position_lr_init, "name": "xyz"},# mesh_v
             {'params': [self._features_dc], 'lr': training_args.feature_lr, "name": "f_dc"},
             {'params': [self._features_rest], 'lr': training_args.feature_lr / 20.0, "name": "f_rest"},
             {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
@@ -178,7 +197,7 @@ class SplattingClothModel(GaussianBase):
                                                     max_steps=training_args.iters * 80)
     def set_params(self, params):
         if '_xyz' in params:
-            self._xyz = params['_xyz'].to(self.device)
+            self._xyz = params['_xyz'].to(self.device) # mesh_v
         if '_rotation' in params:
             self._rotation = params['_rotation'].to(self.device)
         if '_scaling' in params:
@@ -234,41 +253,51 @@ class SplattingClothModel(GaussianBase):
 
         # sample on mesh
         if sample_fidxs is None or sample_bary is None:
-            num_samples = 10000
+            num_samples = 40000
             sample_fidxs, sample_bary = sample_bary_on_triangles(faces.shape[0], num_samples)
         self.sample_fidxs = sample_fidxs.to(self.device)
         self.sample_bary = sample_bary.to(self.device)
 
         sample_verts = retrieve_verts_barycentric(verts, faces, self.sample_fidxs, self.sample_bary)
-        sample_norms = retrieve_verts_barycentric(norms, faces, self.sample_fidxs, self.sample_bary)
-        sample_norms = thf.normalize(sample_norms, dim=-1)
+        # sample_norms = retrieve_verts_barycentric(norms, faces, self.sample_fidxs, self.sample_bary)
+        # sample_norms = thf.normalize(sample_norms, dim=-1)
+        #
+        # pcd = BasicPointCloud(points=sample_verts.detach().cpu().numpy(),
+        #                       normals=sample_norms.detach().cpu().numpy(),
+        #                       colors=torch.full_like(sample_verts, 0.5).float().cpu())
 
-        pcd = BasicPointCloud(points=sample_verts.detach().cpu().numpy(),
-                              normals=sample_norms.detach().cpu().numpy(),
-                              colors=torch.full_like(sample_verts, 0.5).float().cpu())
+
+
+        pcd = BasicPointCloud(points=self.mesh_verts.detach().cpu().numpy(),
+                              normals=self.mesh_norms.detach().cpu().numpy(),
+                              colors=None)
+        colors = torch.full_like(sample_verts, 0.5).float().cpu()
+        points = sample_verts.detach().cpu().numpy()
+
 
         fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().to(self.device)
-        fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors)).float().to(self.device))
+        fused_color = RGB2SH(torch.tensor(np.asarray(colors)).float().to(self.device))
         features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().to(self.device)
         features[:, :3, 0] = fused_color
         features[:, 3:, 1:] = 0.0
 
         print("Number of points at initialisation : ", fused_point_cloud.shape[0])
+        print("Number of colors at initialisation : ", colors.shape[0])
 
-        dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().to(self.device)), 0.0000001)
+        dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(points)).float().to(self.device)), 0.0000001)
         scales = torch.log(torch.sqrt(dist2))[..., None].repeat(1, 3)
-        rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
+        rots = torch.zeros((sample_verts.shape[0], 4), device="cuda")
         rots[:, 0] = 1
 
-        opacities = inverse_sigmoid(0.7 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
+        opacities = inverse_sigmoid(torch.ones((sample_verts.shape[0], 1), dtype=torch.float, device="cuda"))
 
-        self._xyz = fused_point_cloud
+        self._xyz = fused_point_cloud  # 将_XYZ进行插值
         self._features_dc = features[:, :, 0:1].transpose(1, 2).contiguous()
         self._features_rest = features[:, :, 1:].transpose(1, 2).contiguous()
         self._scaling = scales
         self._rotation = rots
         self._opacity = opacities
-        self.max_radii2D = torch.zeros((self._xyz.shape[0]), device="cuda")
+        self.max_radii2D = torch.zeros((self._opacity.shape[0]), device="cuda")
         self.active_sh_degree = self.max_sh_degree
 
         # use _xyz as uvd
@@ -311,34 +340,19 @@ class SplattingClothModel(GaussianBase):
         # phong surface for triangle walk
         self.phongsurf = PhongSurfacePy3d(cano_verts, cano_faces, cano_norms,
                                           outer_loop=2, inner_loop=50, method='uvd').to(self.device)
-
-    def create_from_canonical(self, cano_mesh, sample_fidxs=None, sample_bary=None):
-        cano_verts = cano_mesh['mesh_verts'].float().to(self.device)
-        cano_norms = cano_mesh['mesh_norms'].float().to(self.device)
-        cano_faces = cano_mesh['mesh_faces'].long().to(self.device)
-        self.setup_canonical(cano_verts, cano_norms, cano_faces)
-        self.mesh_verts = self.cano_verts
-        self.mesh_norms = self.cano_norms
-
-        # sample on mesh
-        if sample_fidxs is None or sample_bary is None:
-            num_samples = self.config.get('num_init_samples', 10000)
-            sample_fidxs, sample_bary = sample_bary_on_triangles(cano_faces.shape[0], num_samples)
-        self.sample_fidxs = sample_fidxs.to(self.device)
-        self.sample_bary = sample_bary.to(self.device)
-
-        sample_verts = retrieve_verts_barycentric(cano_verts, cano_faces, self.sample_fidxs, self.sample_bary)
-        sample_norms = retrieve_verts_barycentric(cano_norms, cano_faces, self.sample_fidxs, self.sample_bary)
-        sample_norms = thf.normalize(sample_norms, dim=-1)
-
-        pcd = BasicPointCloud(points=sample_verts.detach().cpu().numpy(),
-                              normals=sample_norms.detach().cpu().numpy(),
-                              colors=torch.full_like(sample_verts, 0.5).float().cpu())
-        self.create_from_pcd(pcd)
-
-        # use _xyz as uvd
-        if self.config.xyz_as_uvd:
-            self._xyz = torch.zeros_like(self._xyz)
+    def init_human_model(self):
+        self.human_model = SplattingAvatarModel(device=self.device)
+    def create_human_model(self, pc_dir,cano_mesh):
+        self.human_model.setup_config(self.config)
+        ply_fn = os.path.join(pc_dir, 'point_cloud.ply')
+        self.human_model.load_ply(ply_fn)
+        embed_fn = os.path.join(pc_dir, 'embedding.json')
+        self.human_model.load_from_embedding(embed_fn)
+        # cano_mesh_v2 = {
+        #     'mesh_verts':self.human_model.cano_verts,
+        #     'mesh_norms':self.human_model.cano_verts,
+        # }
+        self.human_model.update_to_posed_mesh(cano_mesh)
 
     def update_to_posed_mesh(self, mesh=None):
         if mesh is not None:

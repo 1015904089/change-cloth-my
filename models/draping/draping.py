@@ -63,16 +63,7 @@ def draping(dataset):
         'gender': 'female',
     }
 
-    # cano mesh
-    # smpl_model = smplx_utils.create_smplx_model(**smpl_config)
-    # with torch.no_grad():
-    #     output = smpl_model(**dataset.smpl_params)
-    # w_smpl = output.weights
-    # tfs = output.T
-    # pose_offsets = output.pose_offsets
-    # shape_offsets = output.shape_offsets
-    # root_J = output.joints[:,[0]]
-    # verts_body = output.vertices
+
     beta = dataset.smpl_params["betas"].cuda()
     pose = dataset.smpl_params["body_pose"].cuda()
     beta = dataset.smpl_params["betas"].cuda()

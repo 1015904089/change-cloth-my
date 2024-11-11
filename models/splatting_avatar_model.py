@@ -21,7 +21,7 @@ from .gauss_base import GaussianBase, to_abs_path, to_cache_path
 
 # standard 3dgs
 class SplattingAvatarModel(GaussianBase):
-    def __init__(self, config,
+    def __init__(self, config=None,
                  device=torch.device('cuda'),
                  verbose=False):
         super().__init__()

@@ -1,13 +1,10 @@
 import torch
-import numpy as np
 import argparse
 from omegaconf import OmegaConf
 from models.provider import SphericalSamplingGSDataset
 # from models.GPS.Trainer import Trainer as GPSNetwork
 from models.trainer_coarse_editing import Trainer_SDS
 from models.utils.sh_utils import seed_everything
-from lib.human_loader import StereoHumanDataset
-from torch.utils.data import DataLoader
 import warnings
 warnings.filterwarnings("ignore")
 if __name__ == '__main__':
@@ -126,8 +123,9 @@ if __name__ == '__main__':
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # from models.network_3dgaussain import GSNetwork
-    from models.splatting_avatar_model import SplattingAvatarModel
-    model = SplattingAvatarModel(opt, device)
+    # from models.splatting_avatar_model import SplattingAvatarModel
+    from models.splatting_cloth import SplattingClothModel
+    model = SplattingClothModel(opt, device)
     # model = GPSNetwork(opt)
 
 
@@ -142,7 +140,7 @@ if __name__ == '__main__':
     guidance=None
     # from models.sd import StableDiffusion
 
-    # guidance = StableDiffusion(opt, device, base_path='/home/jian/IDM-VTON/result/checkpoint-4000/')
+    guidance = StableDiffusion(opt, device, base_path='/home/jian/IDM-VTON/result/checkpoint-4000/')
     # guidance = StableDiffusion(opt, device, base_path='yisol/IDM-VTON')
 
 
