@@ -138,7 +138,7 @@ if __name__ == '__main__':
 
 
     guidance=None
-    # from models.sd import StableDiffusion
+    from models.sd import StableDiffusion
 
     guidance = StableDiffusion(opt, device, base_path='/home/jian/IDM-VTON/result/checkpoint-4000/')
     # guidance = StableDiffusion(opt, device, base_path='yisol/IDM-VTON')
