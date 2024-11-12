@@ -58,23 +58,38 @@ def match_pose(pose, small_hand=True, flip=True):
     return pose, rotate_mat
 
 def draping(dataset):
-    smpl_config = {
-        'model_type': 'smpl',
-        'gender': 'female',
-    }
 
-
-    beta = dataset.smpl_params["betas"].cuda()
     pose = dataset.smpl_params["body_pose"].cuda()
     beta = dataset.smpl_params["betas"].cuda()
     transl = dataset.smpl_params["transl"].cuda()
     global_orient = dataset.smpl_params["global_orient"].cuda()
+
+    T_pose = torch.zeros(1, 69).cuda()
+
+    pose = pose.reshape(-1).unsqueeze(0)
+    T_pose = T_pose.reshape(-1).unsqueeze(0)
+
+    posed_smpl_params = {"body_pose": pose, "betas": beta, "transl": transl, "global_orient": global_orient}
+    T_posed_smpl_params = {"body_pose": T_pose, "betas": beta, "transl": transl, "global_orient": global_orient}
+
+
     smpl_server = SMPL(model_path='./smpl_pytorch',
                                 gender='f',
                                 use_hands=False,
                                 use_feet_keypoints=False,
                                 dtype=torch.float32).cuda()
 
+    mesh = draping_helper(posed_smpl_params,smpl_server)
+    T_pose_mesh = draping_helper(T_posed_smpl_params,smpl_server)
+
+    return mesh,T_pose_mesh
+
+def draping_helper(smpl_params,smpl_server):
+
+    pose = smpl_params["body_pose"].cuda()
+    beta = smpl_params["betas"].cuda()
+    transl = smpl_params["transl"].cuda()
+    global_orient = smpl_params["global_orient"].cuda()
     w_smpl, tfs, verts_body, pose_offsets, shape_offsets, root_J = infer_smpl(pose,transl, beta, global_orient,
                                                                               smpl_server)
 
@@ -82,7 +97,7 @@ def draping(dataset):
     #                        torch.LongTensor(smpl_server.faces.astype(int)),
     #                        process=False, validate=False)
     # return mesh
-    pose = torch.cat([dataset.smpl_params['global_orient'], dataset.smpl_params['body_pose']],dim=-1)
+    pose = torch.cat([smpl_params['global_orient'], smpl_params['body_pose']],dim=-1)
     ckpt_path = '/home/jian/ISP/checkpoints'
     model_diffusion, model_draping = load_models(ckpt_path)
     # vertices_garment_T - (#P, 3)
@@ -134,11 +149,10 @@ def draping(dataset):
         # if is_underlying:
         #    garment_faces = torch.LongTensor(np.concatenate((faces_garment_f, num_v_f+faces_garment_b), axis=0)).unsqueeze(0)
         #    deformed_cloth.update_single(garment_skinning, garment_faces)
-        sew = trimesh.load('/home/jian/img/sew.obj')
+        sew = trimesh.load('/home/jian/img/cano_sew.obj')
         mesh = trimesh.Trimesh(garment_skinning.squeeze().cpu().numpy(),sew.faces, process=False, validate=False)
         mesh.export('/home/jian/img/garment.obj')
     return mesh
-
 
 def uv_to_3D(pattern_deform, barycentric_uv_batch, closest_face_idx_uv_batch, uv_faces_cuda):
     _B = len(closest_face_idx_uv_batch)

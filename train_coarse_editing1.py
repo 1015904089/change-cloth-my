@@ -31,8 +31,8 @@ if __name__ == '__main__':
     parser.add_argument('--start_gamma', type=float, default=0.99, help="initial gamma value")
     parser.add_argument('--end_gamma', type=float, default=0.5, help="end gamma value")
     parser.add_argument('--points_times', type=int, default=1, help="repeat editing points x times")
-    parser.add_argument('--position_lr_init', type=float, default=0.00015, help="initial learning rate")
-    parser.add_argument('--position_lr_final', type=float, default=0.000002, help="initial learning rate")
+    parser.add_argument('--position_lr_init', type=float, default=0.15, help="initial learning rate")
+    parser.add_argument('--position_lr_final', type=float, default=0.00005, help="initial learning rate")
     parser.add_argument('--position_lr_delay_mult', type=float, default=0.01, help="initial learning rate")
     parser.add_argument('--position_lr_max_steps', type=float, default=5_000, help="initial learning rate")
     parser.add_argument('--feature_lr', type=float, default=0.05, help="initial learning rate")
@@ -41,11 +41,11 @@ if __name__ == '__main__':
     parser.add_argument('--scaling_lr', type=float, default=0.005, help="initial learning rate")
     parser.add_argument('--rotation_lr', type=float, default=0.001, help="initial learning rate")
     parser.add_argument('--percent_dense', type=float, default=0.1, help="0.01")
-    parser.add_argument('--densification_interval', type=float, default=200)
-    parser.add_argument('--opacity_reset_interval', type=float, default=2000)
-    parser.add_argument('--densify_from_iter', type=float, default=500)
+    parser.add_argument('--densification_interval', type=float, default=20)#200
+    parser.add_argument('--opacity_reset_interval', type=float, default=20)#2000
+    parser.add_argument('--densify_from_iter', type=float, default=50) #500
     parser.add_argument('--densify_until_iter', type=float, default=800)
-    parser.add_argument('--densify_grad_threshold', type=float, default=15, help="0.0002")
+    parser.add_argument('--densify_grad_threshold', type=float, default=0.0002, help="0.0002") #15
     parser.add_argument('--min_opacity', type=float, default=0.005)
     parser.add_argument('--max_screen_size', type=float, default=20.0)
     parser.add_argument('--max_scale_size', type=float, default=0.05)

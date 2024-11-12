@@ -66,12 +66,25 @@ class Trainer_SDS(object):
         # self.model.load_from_embedding(embed_fn)
         # self.model.update_to_posed_mesh(cano_mesh)
         # mesh = trimesh.load('/home/jian/ISP/tmp/fitting/1/layer_bottom_000.obj')
-        mesh = draping(dataset,)
+        # mesh_cano = trimesh.load('/home/jian/img/cano_sew.obj')
+        # vertices = mesh_cano.vertices
+        # vertices[:, 1] = -vertices[:, 1] # invert y
+        # vertices[:, 2] = -vertices[:, 2] # invert y
+        mesh,mesh_cano = draping(dataset,)
+
+        # mesh = trimesh.Trimesh(vertices, mesh_cano.faces)
         self.model.create_from_mesh(mesh)
         self.model.update_to_cano_mesh()
         self.model.init_human_model()
         self.model.create_human_model(pc_dir, cano_mesh)
         self.gs_optim = SplattingAvatarOptimizer(self.model, self.opt)
+
+
+        self.material = Material()
+
+        self.cloth = Cloth_from_NP(mesh_cano.vertices, mesh_cano.faces, self.material)
+
+
 
         self.bg_color = torch.zeros(3).to(self.device)
 
@@ -101,10 +114,10 @@ class Trainer_SDS(object):
             f'[INFO] Trainer:  {self.time_stamp} | {self.device} | {self.workspace}')
 
         print('generate bounding_box')
-        mesh = o3d.io.read_triangle_mesh(self.opt.bbox_path)
-        mesh = o3d.t.geometry.TriangleMesh.from_legacy(mesh)
+        bbx_mesh = o3d.io.read_triangle_mesh(self.opt.bbox_path)
+        bbx_mesh = o3d.t.geometry.TriangleMesh.from_legacy(bbx_mesh)
         self.bounding_box = o3d.t.geometry.RaycastingScene()
-        _ = self.bounding_box.add_triangles(mesh)
+        _ = self.bounding_box.add_triangles(bbx_mesh)
 
 
         print('active_sh_degree: {}'.format(self.model.active_sh_degree))
@@ -121,7 +134,8 @@ class Trainer_SDS(object):
         self.openpose_model = OpenPose(0)
         self.openpose_model.preprocessor.body_estimation.model.to(self.device)
         self.addition = {}
-        self.material = Material()
+
+
 
 
 
@@ -205,7 +219,7 @@ class Trainer_SDS(object):
             # pred_rgb.retain_grad()
             loss.backward()
 
-            # self.gs_optim.adaptive_density_control(output_list, self.global_step)
+            self.gs_optim.adaptive_density_control(output_list, self.global_step)
 
             self.gs_optim.step()
             self.gs_optim.zero_grad(set_to_none=True)
@@ -233,14 +247,17 @@ class Trainer_SDS(object):
         # cloth_mask
         human_pred = pred_rgb * (cloth_mask < 0.5)
         rgbs = ori_rgb
-        # loss = l1_loss(pred_rgb, rgbs)
+        loss = l1_loss(pred_rgb, rgbs)
 
         # cloth = Cloth_from_NP(mesh_atlas_sewing.vertices, mesh_atlas_sewing.faces, self.material)
+        loss_bending = 0
+        loss_strain = 0
+        loss_gravity = 0
+        # loss_strain = stretching_energy(self.model._xyz.unsqueeze(0), self.cloth)
+        # loss_bending = bending_energy(self.model._xyz.unsqueeze(0), self.cloth)
+        # loss_gravity = gravitational_energy(self.model._xyz.unsqueeze(0), self.cloth.v_mass)
 
-        # loss_strain = stretching_energy(self.model.get_xyz.unsqueeze(0), cloth)
-        # loss_bending = bending_energy(self.model.get_xyz.unsqueeze(0), cloth)
-        # loss_gravity = gravitational_energy(self.model.get_xyz.unsqueeze(0), cloth.v_mass)
-
+        # collision_penalty(self.model._xyz.unsqueeze(0), self.cloth)
 
         # return loss,outputs
 
@@ -258,12 +275,12 @@ class Trainer_SDS(object):
                                         global_step=self.global_step,
                                         ori_rgb=rgbs,key_points=key_points)
         # loss = 0
-
+        loss += 0.5 * (loss_strain + loss_bending + loss_gravity)
         # depth = torch.stack([pred_depths],dim=0)
-        masked_ori = (cloth_mask<0.5)*ori_rgb
-        masked_pred = (cloth_mask<0.5)*pred_rgb
-        masked_loss = l1_loss(masked_ori, masked_pred)
-        loss = loss + masked_loss
+        # masked_ori = (cloth_mask<0.5)*ori_rgb
+        # masked_pred = (cloth_mask<0.5)*pred_rgb
+        # masked_loss = l1_loss(masked_ori, masked_pred)
+        # loss = loss + masked_loss
         # # rgb_loss = (1.0 - 0.2) * loss_c + 0.2 * loss_s
         # tv_c_loss = tv_loss(pred_global_rgb)
         # tv_d_loss = tv_loss(depth)
@@ -289,7 +306,7 @@ class Trainer_SDS(object):
             grad_ = grad * min_scale
             return grad_
 
-        pred_rgb.register_hook(_hook)
+        # pred_rgb.register_hook(_hook)
         # depth.register_hook(_hook_1)
 
         return loss,outputs

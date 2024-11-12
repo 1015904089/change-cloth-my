@@ -260,17 +260,17 @@ class StableDiffusion(nn.Module):
         init_image = self.normal(pred_rgb.unsqueeze(0))
         init_rgb = self.normal(ori_rgb.unsqueeze(0))
 
-        if global_step > 1500: #800
+        if global_step > 600: #800
             min_step_percent = 0.02
             max_step_percent = 0.35
 
-        elif global_step > 1000: # 500
-            min_step_percent = 0.02
-            max_step_percent = 0.55
-
-        elif global_step > 0:# 200
+        elif global_step > 300: # 500
             min_step_percent = 0.02
             max_step_percent = 0.8
+
+        elif global_step > 0:# 200
+            min_step_percent = 0.8
+            max_step_percent = 0.98
         # else:
         #     min_step_percent = 0.02
         #     max_step_percent = 0.98

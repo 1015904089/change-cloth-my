@@ -91,8 +91,8 @@ class SplattingAvatarOptimizer(LossBase):
             })
 
         self.optimizer = torch.optim.Adam(l, lr=5e-4, eps=1e-15)
-        model.xyz_gradient_accum = torch.zeros((model._xyz.shape[0], 1), device='cuda')
-        model.denom = torch.zeros((model._xyz.shape[0], 1), device='cuda')
+        model.xyz_gradient_accum = torch.zeros((model._xyz_form_mesh_verts.shape[0], 1), device='cuda')
+        model.denom = torch.zeros((model._xyz_form_mesh_verts.shape[0], 1), device='cuda')
         model.percent_dense = getattr(optimizer_config, 'percent_dense', 0.01)
         model.optimizer = self.optimizer
 
@@ -147,7 +147,7 @@ class SplattingAvatarOptimizer(LossBase):
     def _prune_optimizer(self, mask):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
-            if len(group['params']) != 1:
+            if len(group['params']) != 1 or group['name']=='_xyz':
                 continue
 
             stored_state = self.optimizer.state.get(group['params'][0], None)
@@ -190,7 +190,7 @@ class SplattingAvatarOptimizer(LossBase):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
             # assert len(group['params']) == 1
-            if len(group['params']) != 1:
+            if len(group['params']) != 1 or group['name']=='_xyz':
                 continue
 
             extension_tensor = tensors_dict[group['name']]
@@ -216,7 +216,7 @@ class SplattingAvatarOptimizer(LossBase):
     
     def densification_postfix(self, densify_out):
         d = {
-            '_xyz': densify_out['new_xyz'],
+            # '_xyz': densify_out['new_xyz'],
             '_scaling' : densify_out['new_scaling'],
             '_rotation' : densify_out['new_rotation'],
         }
@@ -259,12 +259,12 @@ class SplattingAvatarOptimizer(LossBase):
     def prune(self, min_opacity, extent, max_screen_size):
         model = self.gs_model
 
-        opacity = model.get_opacity
+        opacity = model.get_opacity[-self.gs_model.num_cloth_gauss:]
         prune_mask = (opacity < min_opacity).squeeze()
 
         if max_screen_size:
             big_points_vs = model.max_radii2D > max_screen_size
-            big_points_ws = model.get_scaling.max(dim=1).values > 0.1 * extent
+            big_points_ws = model.get_scaling.max(dim=1).values[-self.gs_model.num_cloth_gauss:] > 0.1 * extent
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
 
         self.prune_points(prune_mask)
@@ -279,6 +279,11 @@ class SplattingAvatarOptimizer(LossBase):
         visibility_filter = render_pkg['visibility_filter']
         radii = render_pkg['radii']
         opt = self.optimizer_config
+
+        viewspace_point_tensor_cloth = viewspace_point_tensor[-model.num_cloth_gauss:]
+        visibility_filter_cloth = visibility_filter[-model.num_cloth_gauss:]
+        radii_cloth = radii[-model.num_cloth_gauss:]
+
         # opacity_reset_iter = opt.get('opacity_reset_start_iter', 300)
         # opacity_reset_interval = opt.get('opacity_reset_interval', 0)
         opacity_reset_iter = opt.opacity_reset_interval
@@ -286,8 +291,9 @@ class SplattingAvatarOptimizer(LossBase):
         # Densification
         if iteration < opt.densify_until_iter:
             # Keep track of max radii in image-space for pruning
-            model.max_radii2D[visibility_filter] = torch.max(model.max_radii2D[visibility_filter], radii[visibility_filter])
-            self.add_densification_stats(viewspace_point_tensor, visibility_filter)
+            model.max_radii2D[visibility_filter_cloth] = torch.max(model.max_radii2D[visibility_filter_cloth],
+                                                                   radii_cloth[visibility_filter_cloth])
+            self.add_densification_stats(viewspace_point_tensor, visibility_filter_cloth)
 
             if iteration >= opt.densify_from_iter and iteration % opt.densification_interval == 0:
                 size_threshold = opt.densify_grad_threshold if iteration > opacity_reset_interval else None

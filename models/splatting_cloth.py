@@ -20,7 +20,7 @@ from .gauss_base import GaussianBase, to_abs_path, to_cache_path
 import pytorch3d.structures.meshes as py3d_meshes
 from models.splatting_avatar_model import SplattingAvatarModel
 from models.gauss_base import GaussianBase
-
+import copy
 # standard 3dgs
 class SplattingClothModel(GaussianBase):
     def __init__(self, config,
@@ -44,6 +44,10 @@ class SplattingClothModel(GaussianBase):
 
         if config is not None:
             self.setup_config(config)
+            # if self.config.opacity_type == 'strengths':
+            #     def strengths(_opacity):
+            #         return torch.ones_like(_opacity)
+            #     self.opacity_activation = strengths
 
 
     ##################################################
@@ -60,19 +64,23 @@ class SplattingClothModel(GaussianBase):
     def get_xyz_cano(self):
         if self.config.xyz_as_uvd:
             # uv -> self.sample_bary -> self.base_normal --(d)--> xyz
-            xyz = self.base_normal_cano * self.from_xyz[..., -1:]
+            # xyz = self.base_normal_cano * self.from_xyz[..., -1:]
+            xyz = self.base_normal_cano * self._xyz_form_mesh_verts[..., :]
             _xyz = self.base_xyz_cano + xyz
         else:
-            _xyz = self.from_xyz
+            _xyz = retrieve_verts_barycentric(self._xyz, self.cano_faces,     # 优化参数xyz插值
+                                   self.sample_fidxs, self.sample_bary)
         return torch.cat((self.human_model.get_xyz_cano, _xyz), dim=0)
     @property
     def get_xyz(self):
         if self.config.xyz_as_uvd:
             # uv -> self.sample_bary -> self.base_normal --(d)--> xyz
-            xyz = self.base_normal * self._xyz_form_mesh_verts[..., -1:] # self.base_normal.norm(dim=1) = [1,1,1,1,1....]
+            # xyz = self.base_normal * self._xyz_form_mesh_verts[..., -1:] # self.base_normal.norm(dim=1) = [1,1,1,1,1....]
+            xyz = self.base_normal * self._xyz_form_mesh_verts[..., :] # self.base_normal.norm(dim=1) = [1,1,1,1,1....]
             _xyz= self.base_xyz + xyz
         else:
-            _xyz= self._xyz_form_mesh_verts
+            _xyz= retrieve_verts_barycentric(self._xyz, self.cano_faces,     # 优化参数xyz插值
+                                   self.sample_fidxs, self.sample_bary)
         return torch.cat((self.human_model.get_xyz, _xyz), dim=0)
 
     @property
@@ -179,8 +187,8 @@ class SplattingClothModel(GaussianBase):
         # if iteration>200:
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
-        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        self.xyz_gradient_accum = torch.zeros((self._xyz_form_mesh_verts.shape[0], 1), device="cuda")
+        self.denom = torch.zeros((self._xyz_form_mesh_verts.shape[0], 1), device="cuda")
         l = [
             {'params': [self._xyz], 'lr': training_args.position_lr_init, "name": "xyz"},# mesh_v
             {'params': [self._features_dc], 'lr': training_args.feature_lr, "name": "f_dc"},
@@ -232,6 +240,8 @@ class SplattingClothModel(GaussianBase):
         # enabling uvd representation of SplattingAvatar
         self.config.xyz_as_uvd = getattr(config, 'xyz_as_uvd', True)
         self.config.with_mesh_scaling = getattr(config, 'with_mesh_scaling', False)
+        self.config.opacity_type = getattr(config,'opacity_type', 'strengths')
+        self.config.skip_triangle_walk = getattr(config, 'skip_triangle_walk', False)
 
     def create_from_mesh(self, mesh, sample_fidxs=None, sample_bary=None):
         verts = torch.tensor(mesh.vertices).float().to(self.device)
@@ -253,7 +263,7 @@ class SplattingClothModel(GaussianBase):
 
         # sample on mesh
         if sample_fidxs is None or sample_bary is None:
-            num_samples = 40000
+            num_samples = 30000
             sample_fidxs, sample_bary = sample_bary_on_triangles(faces.shape[0], num_samples)
         self.sample_fidxs = sample_fidxs.to(self.device)
         self.sample_bary = sample_bary.to(self.device)
@@ -289,7 +299,7 @@ class SplattingClothModel(GaussianBase):
         rots = torch.zeros((sample_verts.shape[0], 4), device="cuda")
         rots[:, 0] = 1
 
-        opacities = inverse_sigmoid(torch.ones((sample_verts.shape[0], 1), dtype=torch.float, device="cuda"))
+        opacities = inverse_sigmoid(0.99 * torch.ones((sample_verts.shape[0], 1), dtype=torch.float, device="cuda"))
 
         self._xyz = fused_point_cloud  # 将_XYZ进行插值
         self._features_dc = features[:, :, 0:1].transpose(1, 2).contiguous()
@@ -343,7 +353,9 @@ class SplattingClothModel(GaussianBase):
     def init_human_model(self):
         self.human_model = SplattingAvatarModel(device=self.device)
     def create_human_model(self, pc_dir,cano_mesh):
-        self.human_model.setup_config(self.config)
+        config = copy.copy(self.config)
+        config.xyz_as_uvd=True
+        self.human_model.setup_config(config)
         ply_fn = os.path.join(pc_dir, 'point_cloud.ply')
         self.human_model.load_ply(ply_fn)
         embed_fn = os.path.join(pc_dir, 'embedding.json')
@@ -371,7 +383,8 @@ class SplattingClothModel(GaussianBase):
 
     ##################################################
     def prune_points(self, valid_points_mask, optimizable_tensors):
-        self._xyz = optimizable_tensors['_xyz']
+        if '_xyz' in optimizable_tensors:
+            self._xyz = optimizable_tensors['_xyz']
 
         if '_scaling' in optimizable_tensors:
             self._scaling = optimizable_tensors['_scaling']
@@ -387,16 +400,17 @@ class SplattingClothModel(GaussianBase):
         self._features_dc = optimizable_tensors.get('_features_dc', self._features_dc)
         self._features_rest = optimizable_tensors.get('_features_rest', self._features_rest)
 
-        if self.config.xyz_as_uvd:
-            self.sample_fidxs = self.sample_fidxs[valid_points_mask]
-            self.sample_bary = self.sample_bary[valid_points_mask]
+        # if self.config.xyz_as_uvd:
+        self.sample_fidxs = self.sample_fidxs[valid_points_mask]
+        self.sample_bary = self.sample_bary[valid_points_mask]
 
         self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
         self.denom = self.denom[valid_points_mask]
         self.max_radii2D = self.max_radii2D[valid_points_mask]
 
     def densification_postfix(self, optimizable_tensors, densify_out):
-        self._xyz = optimizable_tensors.get('_xyz', self._xyz)
+        if '_xyz' in optimizable_tensors:
+            self._xyz = optimizable_tensors.get('_xyz', self._xyz)
 
         if '_scaling' in optimizable_tensors:
             self._scaling = optimizable_tensors['_scaling']
@@ -413,17 +427,17 @@ class SplattingClothModel(GaussianBase):
         self._features_rest = optimizable_tensors.get('_features_rest', self._features_rest)
 
         # mesh embedding
-        if self.config.xyz_as_uvd:
-            self.sample_fidxs = torch.cat([self.sample_fidxs, densify_out['new_sample_fidxs']], dim=0)
-            self.sample_bary = torch.cat([self.sample_bary, densify_out['new_sample_bary']], dim=0)
+        # if self.config.xyz_as_uvd:
+        self.sample_fidxs = torch.cat([self.sample_fidxs, densify_out['new_sample_fidxs']], dim=0)
+        self.sample_bary = torch.cat([self.sample_bary, densify_out['new_sample_bary']], dim=0)
 
         # stats
-        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device='cuda')
-        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device='cuda')
-        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device='cuda')
+        self.xyz_gradient_accum = torch.zeros((self._opacity.shape[0], 1), device='cuda')
+        self.denom = torch.zeros((self._opacity.shape[0], 1), device='cuda')
+        self.max_radii2D = torch.zeros((self._opacity.shape[0]), device='cuda')
 
     def prepare_densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
-        n_init_points = self.get_xyz.shape[0]
+        n_init_points = self.num_cloth_gauss
         # Extract points that satisfy the gradient condition
         padded_grad = torch.zeros((n_init_points), device='cuda')
         padded_grad[:grads.shape[0]] = grads.squeeze()
@@ -431,44 +445,44 @@ class SplattingClothModel(GaussianBase):
 
         selected_pts_mask = torch.logical_and(
             selected_pts_mask,
-            torch.max(self.get_scaling_cano, dim=1).values > self.percent_dense * scene_extent)
+            torch.max(self.get_scaling_cano[-self.num_cloth_gauss:], dim=1).values > self.percent_dense * scene_extent)
 
-        stds = self.get_scaling_cano[selected_pts_mask].repeat(N, 1)
+        stds = self.get_scaling_cano[-self.num_cloth_gauss:][selected_pts_mask].repeat(N, 1)
         means = torch.zeros((stds.size(0), 3), device='cuda')
         samples = torch.normal(mean=means, std=stds)
-        rots = build_rotation(self.get_rotation_cano[selected_pts_mask]).repeat(N, 1, 1)
-        new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz_cano[selected_pts_mask].repeat(N, 1)
+        rots = build_rotation(self.get_rotation_cano[-self.num_cloth_gauss:][selected_pts_mask]).repeat(N, 1, 1)
+        new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz_cano[-self.num_cloth_gauss:][selected_pts_mask].repeat(N, 1)
         return selected_pts_mask, new_xyz.detach()
 
     def prepare_split_selected_to_new_xyz(self, selected_pts_mask, new_xyz, N):
         new_scaling = self.scaling_inverse_activation(
-            self.get_scaling_cano[selected_pts_mask].repeat(N, 1) / (0.8 * N))
+            self.get_scaling_cano[-self.num_cloth_gauss:][selected_pts_mask].repeat(N, 1) / (0.8 * N))
         new_rotation = self._rotation[selected_pts_mask].repeat(N, 1)
 
         splitout = {
-            'new_xyz': new_xyz,
+            # 'new_xyz': new_xyz,
             'new_scaling': new_scaling,
             'new_rotation': new_rotation,
         }
 
         # fit uvd to new_xyz
-        if self.config.xyz_as_uvd:
+        # if self.config.xyz_as_uvd:
             # find new embedding point
-            fidx = self.sample_fidxs[selected_pts_mask].repeat(N)
-            uv = self.sample_bary[selected_pts_mask, :2].repeat(N, 1)
-            d = self._xyz[selected_pts_mask, -1:].repeat(N, 1)
+        fidx = self.sample_fidxs[selected_pts_mask].repeat(N)
+        uv = self.sample_bary[selected_pts_mask, :2].repeat(N, 1)
+        new_xyz_from_mesh = self._xyz_form_mesh_verts[selected_pts_mask, -1:].repeat(N, 1)
 
-            if not self.config.skip_triangle_walk:
-                fidx, uv = self.phongsurf.update_corres_spt(new_xyz, None, fidx, uv)
+        if not self.config.skip_triangle_walk:
+            fidx, uv = self.phongsurf.update_corres_spt(new_xyz_from_mesh.detach(), None, fidx, uv)
 
-            bary = torch.concat([uv, 1.0 - uv[:, 0:1] - uv[:, 1:2]], dim=-1)
-            new_xyz = torch.concat([torch.zeros_like(uv), d], dim=-1)
+        bary = torch.concat([uv, 1.0 - uv[:, 0:1] - uv[:, 1:2]], dim=-1)
+        # new_xyz = torch.concat([torch.zeros_like(uv), d], dim=-1)
 
-            splitout.update({
-                'new_xyz': new_xyz,
-                'new_sample_fidxs': fidx,
-                'new_sample_bary': bary,
-            })
+        splitout.update({
+            # 'new_xyz': new_xyz,
+            'new_sample_fidxs': fidx,
+            'new_sample_bary': bary,
+        })
 
         new_features_dc = self._features_dc[selected_pts_mask].repeat(N, 1, 1)
         new_features_rest = self._features_rest[selected_pts_mask].repeat(N, 1, 1)
@@ -485,10 +499,10 @@ class SplattingClothModel(GaussianBase):
         # Extract points that satisfy the gradient condition
         selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
-                                              torch.max(self.get_scaling,
+                                              torch.max(self.get_scaling[-self.num_cloth_gauss:],
                                                         dim=1).values <= self.percent_dense * scene_extent)
 
-        new_xyz = self._xyz[selected_pts_mask]
+        new_xyz = self._xyz_form_mesh_verts[selected_pts_mask]
         new_scaling = self._scaling[selected_pts_mask]
         new_rotation = self._rotation[selected_pts_mask]
 
@@ -507,16 +521,16 @@ class SplattingClothModel(GaussianBase):
             'new_opacity': new_opacity,
         })
 
-        if self.config.xyz_as_uvd:
-            cloneout.update({
-                'new_sample_fidxs': self.sample_fidxs[selected_pts_mask],
-                'new_sample_bary': self.sample_bary[selected_pts_mask],
-            })
+        # if self.config.xyz_as_uvd:
+        cloneout.update({
+            'new_sample_fidxs': self.sample_fidxs[selected_pts_mask],
+            'new_sample_bary': self.sample_bary[selected_pts_mask],
+        })
 
         return cloneout
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
-        self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter, :2], dim=-1,
+        self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[-self.num_cloth_gauss:][update_filter, :2], dim=-1,
                                                              keepdim=True)
         self.denom[update_filter] += 1
 

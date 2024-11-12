@@ -92,7 +92,8 @@ def render(viewpoint_camera, pc, bg_color, scaling_modifier = 1.0,
             shs = pc.get_features
     else:
         colors_precomp = override_color
-
+    # mask = torch.ones(means3D.shape[0]).to(opacity)
+    # mask[:-pc.num_cloth_gauss] = 0
     if mask is not None:
         # print(start_point)
         means3D = means3D[mask == 1]
@@ -117,7 +118,7 @@ def render(viewpoint_camera, pc, bg_color, scaling_modifier = 1.0,
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.
     return {"image": rendered_image,
-            "viewspace_points": screenspace_points[:-pc.num_cloth_gauss],
-            "visibility_filter" : radii[:-pc.num_cloth_gauss] > 0,
-            "radii": radii[:-pc.num_cloth_gauss],
+            "viewspace_points": screenspace_points,
+            "visibility_filter" : radii > 0,
+            "radii": radii,
             "depths": depths[:1]}
