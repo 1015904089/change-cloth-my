@@ -49,7 +49,7 @@ def render(viewpoint_camera, pc, bg_color, scaling_modifier = 1.0,
         sh_degree=pc.active_sh_degree,
         campos=viewpoint_camera.camera_center,
         prefiltered=False,
-        # debug=pipe.debug
+        debug=False,
     )
 
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
@@ -104,7 +104,7 @@ def render(viewpoint_camera, pc, bg_color, scaling_modifier = 1.0,
         rotations = rotations[mask == 1]
 
     # Rasterize visible Gaussians to image, obtain their radii (on screen). 
-    rendered_image, radii, depths = rasterizer(
+    rendered_image, radii = rasterizer(
         means3D = means3D,
         means2D = means2D,
         shs = shs,
@@ -121,4 +121,5 @@ def render(viewpoint_camera, pc, bg_color, scaling_modifier = 1.0,
             "viewspace_points": screenspace_points,
             "visibility_filter" : radii > 0,
             "radii": radii,
-            "depths": depths[:1]}
+            # "depths": depths[:1]
+            }

@@ -165,7 +165,7 @@ class Trainer_SDS(object):
             #     self.save_checkpoint_to_dir(dir= self.time_stamp,name = epoch)
             #     # self.model.save_ply(os.path.join(self.workspace, 'ply', '{}.ply'.format(str(epoch))))
             #     # sys.exit()
-            if self.epoch > 1:
+            if self.global_step % 5 == 0 or self.epoch in [1, 2, 3, 4]:
                 with torch.no_grad():
                     self.evaluate(valid_loader)
             self.train_one_epoch(train_loader)
@@ -191,10 +191,10 @@ class Trainer_SDS(object):
 
                 pbar.update(loader.batch_size)
 
-        # 调整所有opacity到[0,10],并且不求倒
-        opacity = torch.where(self.model._opacity <= 0, torch.tensor(-10.0), torch.tensor(10.0))
-        self.model._opacity = nn.Parameter(opacity)
-        self.model._opacity.requires_grad = False
+        # # 调整所有opacity到[0,10],并且不求倒
+        # opacity = torch.where(self.model._opacity <= 0, torch.tensor(-10.0), torch.tensor(10.0))
+        # self.model._opacity = nn.Parameter(opacity)
+        # self.model._opacity.requires_grad = False
 
     def train_one_epoch(self, loader):
         self.log(
@@ -216,10 +216,16 @@ class Trainer_SDS(object):
 
             loss, output_list = self.train_step(data)
             pred_rgb = output_list['image']
-            # pred_rgb.retain_grad()
+            pred_rgb.retain_grad()
+            self.model._xyz.retain_grad()
+            self.model._scaling.retain_grad()
+            self.model._opacity.retain_grad()
+            self.model._features_dc.retain_grad()
+            self.model.get_xyz.retain_grad()
+
             loss.backward()
 
-            self.gs_optim.adaptive_density_control(output_list, self.global_step)
+            # self.gs_optim.adaptive_density_control(output_list, self.global_step)
 
             self.gs_optim.step()
             self.gs_optim.zero_grad(set_to_none=True)
@@ -248,7 +254,7 @@ class Trainer_SDS(object):
         human_pred = pred_rgb * (cloth_mask < 0.5)
         rgbs = ori_rgb
         loss = l1_loss(pred_rgb, rgbs)
-
+        # pred_rgb.retain_grad()
         # cloth = Cloth_from_NP(mesh_atlas_sewing.vertices, mesh_atlas_sewing.faces, self.material)
         loss_bending = 0
         loss_strain = 0

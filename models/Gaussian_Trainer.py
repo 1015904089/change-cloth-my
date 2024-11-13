@@ -170,7 +170,7 @@ class Trainer_GS(object):
             # pred_rgb.retain_grad()
             loss.backward()
 
-            self.gs_optim.adaptive_density_control(output_list, self.global_step)
+            # self.gs_optim.adaptive_density_control(output_list, self.global_step)
 
             self.gs_optim.step()
             self.gs_optim.zero_grad(set_to_none=True)

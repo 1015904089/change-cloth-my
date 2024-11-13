@@ -31,7 +31,7 @@ if __name__ == '__main__':
     parser.add_argument('--start_gamma', type=float, default=0.99, help="initial gamma value")
     parser.add_argument('--end_gamma', type=float, default=0.5, help="end gamma value")
     parser.add_argument('--points_times', type=int, default=1, help="repeat editing points x times")
-    parser.add_argument('--position_lr_init', type=float, default=0.15, help="initial learning rate")
+    parser.add_argument('--position_lr_init', type=float, default=0.0015, help="initial learning rate")
     parser.add_argument('--position_lr_final', type=float, default=0.00005, help="initial learning rate")
     parser.add_argument('--position_lr_delay_mult', type=float, default=0.01, help="initial learning rate")
     parser.add_argument('--position_lr_max_steps', type=float, default=5_000, help="initial learning rate")

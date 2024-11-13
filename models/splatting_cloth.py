@@ -64,7 +64,6 @@ class SplattingClothModel(GaussianBase):
     def get_xyz_cano(self):
         if self.config.xyz_as_uvd:
             # uv -> self.sample_bary -> self.base_normal --(d)--> xyz
-            # xyz = self.base_normal_cano * self.from_xyz[..., -1:]
             xyz = self.base_normal_cano * self._xyz_form_mesh_verts[..., :]
             _xyz = self.base_xyz_cano + xyz
         else:
@@ -75,19 +74,14 @@ class SplattingClothModel(GaussianBase):
     def get_xyz(self):
         if self.config.xyz_as_uvd:
             # uv -> self.sample_bary -> self.base_normal --(d)--> xyz
-            # xyz = self.base_normal * self._xyz_form_mesh_verts[..., -1:] # self.base_normal.norm(dim=1) = [1,1,1,1,1....]
-            xyz = self.base_normal * self._xyz_form_mesh_verts[..., :] # self.base_normal.norm(dim=1) = [1,1,1,1,1....]
+            xyz = self.base_normal * thf.normalize(self._xyz_form_mesh_verts[..., :]) # self.base_normal.norm(dim=1) = [1,1,1,1,1....]
             _xyz= self.base_xyz + xyz
         else:
-            _xyz= retrieve_verts_barycentric(self._xyz, self.cano_faces,     # 优化参数xyz插值
-                                   self.sample_fidxs, self.sample_bary)
+            # _xyz= self._xyz
+            _xyz = retrieve_verts_barycentric(self._xyz, self.cano_faces, self.sample_fidxs, self.sample_bary)
         return torch.cat((self.human_model.get_xyz, _xyz), dim=0)
 
-    @property
-    def _xyz_form_mesh_verts(self):
-        return thf.normalize(retrieve_verts_barycentric(self._xyz, self.cano_faces,     # 优化参数xyz插值
-                                   self.sample_fidxs, self.sample_bary),
-                             dim=-1)
+
 
     @property
     def base_normal_cano(self):
@@ -100,7 +94,10 @@ class SplattingClothModel(GaussianBase):
         return thf.normalize(retrieve_verts_barycentric(self.mesh_norms, self.cano_faces,   # 原始的mesh 法向插值
                                                         self.sample_fidxs, self.sample_bary),
                              dim=-1)
-
+    @property
+    def _xyz_form_mesh_verts(self):
+        return retrieve_verts_barycentric(self._xyz, self.cano_faces,
+                                          self.sample_fidxs, self.sample_bary)   # 问题出在这里，为什么不归一化就很难训练
     @property
     def base_xyz_cano(self):
         return retrieve_verts_barycentric(self.cano_verts, self.cano_faces,         # 第一帧图片的point插值
@@ -238,7 +235,7 @@ class SplattingClothModel(GaussianBase):
 
         # use _xyz as variables for uvd
         # enabling uvd representation of SplattingAvatar
-        self.config.xyz_as_uvd = getattr(config, 'xyz_as_uvd', True)
+        self.config.xyz_as_uvd = getattr(config, 'xyz_as_uvd', False)
         self.config.with_mesh_scaling = getattr(config, 'with_mesh_scaling', False)
         self.config.opacity_type = getattr(config,'opacity_type', 'strengths')
         self.config.skip_triangle_walk = getattr(config, 'skip_triangle_walk', False)
@@ -301,7 +298,8 @@ class SplattingClothModel(GaussianBase):
 
         opacities = inverse_sigmoid(0.99 * torch.ones((sample_verts.shape[0], 1), dtype=torch.float, device="cuda"))
 
-        self._xyz = fused_point_cloud  # 将_XYZ进行插值
+        # self._xyz = fused_point_cloud  # 将_XYZ进行插值
+        self._xyz = self.cano_verts
         self._features_dc = features[:, :, 0:1].transpose(1, 2).contiguous()
         self._features_rest = features[:, :, 1:].transpose(1, 2).contiguous()
         self._scaling = scales
@@ -330,7 +328,8 @@ class SplattingClothModel(GaussianBase):
 
         opacities = inverse_sigmoid(0.6 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
 
-        self._xyz = fused_point_cloud
+        # self._xyz = fused_point_cloud
+        self._xyz = self.cano_verts
         self._features_dc = features[:, :, 0:1].transpose(1, 2).contiguous()
         self._features_rest = features[:, :, 1:].transpose(1, 2).contiguous()
         self._scaling = scales
@@ -380,6 +379,8 @@ class SplattingClothModel(GaussianBase):
             'mesh_norms': self.cano_norms,
         }
         self.update_to_posed_mesh(cano)
+        # #todo: update self._xyz_form_mesh_verts
+        # self._xyz = self._xyz_form_mesh_verts
 
     ##################################################
     def prune_points(self, valid_points_mask, optimizable_tensors):
