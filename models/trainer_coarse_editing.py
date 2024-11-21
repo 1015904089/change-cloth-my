@@ -22,16 +22,18 @@ import numpy as np
 from detectron2.data.detection_utils import convert_PIL_to_numpy,_apply_exif_orientation
 from models.utils.mask_utils import get_mask_location,crop_img,get_mask_location2
 from models.splatting_avatar_optim import SplattingAvatarOptimizer
-from models.splatting_avatar_model import SplattingAvatarModel
+from models.splatting_avatar_model import TwoDSplattingAvatarModel as SplattingAvatarModel
 from models.snug.snug_class import Body, Cloth_from_NP, Material
-from models.utils.loss_utils import l1_loss, ssim, LPIPS
-from gaussian_renderer import render
+from models.utils.loss_utils import l1_loss, ssim, LPIPS,tv_loss, scaling_loss,img_clip_loss,laplacian_smooth_loss,compute_norm_similarity
+from gaussian_renderer import render, render2d
+from models.utils.general_utils import compute_face_normals
 from torch.nn.functional import sigmoid
 import torch.nn as nn
 import trimesh
 from models.draping.draping import draping
 from models.snug.snug_helper import stretching_energy, bending_energy, gravitational_energy, collision_penalty, shrink_penalty
-
+import show
+import clip
 class Trainer_SDS(object):
     def __init__(self,
                  opt,
@@ -60,8 +62,16 @@ class Trainer_SDS(object):
 
         cano_mesh = dataset.cano_mesh
 
+        ######AvatarNetwork######
         # ply_fn = os.path.join(pc_dir, 'point_cloud.ply')
         # self.model.load_ply(ply_fn)
+        # embed_fn = os.path.join(pc_dir, 'embedding.json')
+        # self.model.load_from_embedding(embed_fn)
+        #########################
+
+
+        ######################
+
         # embed_fn = os.path.join(pc_dir, 'embedding.json')
         # self.model.load_from_embedding(embed_fn)
         # self.model.update_to_posed_mesh(cano_mesh)
@@ -70,23 +80,27 @@ class Trainer_SDS(object):
         # vertices = mesh_cano.vertices
         # vertices[:, 1] = -vertices[:, 1] # invert y
         # vertices[:, 2] = -vertices[:, 2] # invert y
-        mesh,mesh_cano = draping(dataset,)
-
-        # mesh = trimesh.Trimesh(vertices, mesh_cano.faces)
+        mesh, mesh_cano = draping(dataset,)
         self.model.create_from_mesh(mesh)
-        self.model.update_to_cano_mesh()
-        self.model.init_human_model()
-        self.model.create_human_model(pc_dir, cano_mesh)
-        self.gs_optim = SplattingAvatarOptimizer(self.model, self.opt)
-
+        self.model.training_setup(self.opt)
+        self.model.load_human(cano_mesh)
+        # self.model.human_model.training_setup(self.opt)
+        # self.model.max_radii2D = torch.zeros((self.model.get_xyz.shape[0]), device="cuda")
+        self.scaler = torch.cuda.amp.GradScaler(enabled=False)
+        # mesh = trimesh.Trimesh(vertices, mesh_cano.faces)
+        # self.model.create_from_mesh(mesh)
+        # self.model.update_to_cano_mesh()
+        # self.model.init_human_model()
+        # self.model.create_human_model(pc_dir, cano_mesh,dataset)
+        # self.gs_optim = SplattingAvatarOptimizer(self.model.human_model, self.opt)
+        # self.gs_optim.opacity_as_one()
 
         self.material = Material()
 
         self.cloth = Cloth_from_NP(mesh_cano.vertices, mesh_cano.faces, self.material)
 
 
-
-        self.bg_color = torch.zeros(3).to(self.device)
+        self.bg_color = torch.ones(3).to(self.device)
 
         # diffusion model
         self.guidance = guidance
@@ -144,8 +158,8 @@ class Trainer_SDS(object):
 
         self.valid_loader = valid_loader
 
-        self.model.xyz_gradient_accum = torch.zeros((self.model.num_cloth_gauss, 1), device="cuda")
-        self.model.denom = torch.zeros((self.model.num_cloth_gauss, 1), device="cuda")
+        self.model.xyz_gradient_accum = torch.zeros((self.model._xyz.shape[0], 1), device="cuda")
+        self.model.denom = torch.zeros((self.model._xyz.shape[0], 1), device="cuda")
 
         if self.use_tensorboardX :
             self.writer = tensorboardX.SummaryWriter(os.path.join(self.workspace, "run", ))
@@ -155,6 +169,9 @@ class Trainer_SDS(object):
         self.evaluate_one_epoch(train_loader)
         # self.test_one_epoch(train_loader)
         # self.getaddition()
+        # self.model.reset_human_opacity()
+        # self.model.compute_inside_triangle()
+        self.model.reset_human_opacity()
         for epoch in range(self.epoch + 1, max_epochs + 1):
 
             self.epoch = epoch
@@ -168,6 +185,8 @@ class Trainer_SDS(object):
             if self.global_step % 5 == 0 or self.epoch in [1, 2, 3, 4]:
                 with torch.no_grad():
                     self.evaluate(valid_loader)
+                if self.epoch % 5 == 0 and self.epoch > 10:
+                    self.model.save_ckpt(self.workspace, self.global_step)
             self.train_one_epoch(train_loader)
 
             # self.remove_oob_points()
@@ -186,19 +205,21 @@ class Trainer_SDS(object):
                          bar_format='{desc}: {percentage:3.0f}% {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
         with torch.no_grad():
             for data in loader:
-                preds, outputs,index = self.render(data,train=False)
+                preds, outputs,index = self.render(data,train=False,cloth=False)
                 self.load_addition(preds, index)  # load addition to the model
 
                 pbar.update(loader.batch_size)
 
         # # 调整所有opacity到[0,10],并且不求倒
-        # opacity = torch.where(self.model._opacity <= 0, torch.tensor(-10.0), torch.tensor(10.0))
-        # self.model._opacity = nn.Parameter(opacity)
-        # self.model._opacity.requires_grad = False
+
 
     def train_one_epoch(self, loader):
-        self.log(
-            f"==> Start Training {self.workspace} Epoch {self.epoch}, lr={self.gs_optim.optimizer.param_groups[0]['lr']:.6f} ...")
+        try:
+            self.log(
+            f"==> Start Training {self.workspace} Epoch {self.epoch}, lr={self.model.optimizer.optimizer.param_groups[0]['lr']:.6f} ...")
+        except:
+            self.log(
+                f"==> Start Training {self.workspace} Epoch {self.epoch}, ...")
 
         total_loss = 0
 
@@ -212,24 +233,22 @@ class Trainer_SDS(object):
             self.local_step += 1
             self.global_step += 1
 
-            self.gs_optim.update_learning_rate(self.global_step)
+            self.model.update_learning_rate(self.global_step)
 
             loss, output_list = self.train_step(data)
             pred_rgb = output_list['image']
-            pred_rgb.retain_grad()
-            self.model._xyz.retain_grad()
-            self.model._scaling.retain_grad()
-            self.model._opacity.retain_grad()
-            self.model._features_dc.retain_grad()
-            self.model.get_xyz.retain_grad()
+            # pred_rgb.retain_grad()
+            # self.model._xyz.retain_grad()
+            # self.model._opacity.retain_grad()
 
             loss.backward()
 
-            # self.gs_optim.adaptive_density_control(output_list, self.global_step)
-
-            self.gs_optim.step()
-            self.gs_optim.zero_grad(set_to_none=True)
-
+            # self.model.adaptive_density_control(output_list, self.global_step)
+            self.model.update_trangle_walk(self.global_step)
+            self.model.optimizer.step()
+            self.model.optimizer.zero_grad(set_to_none=True)
+            # self.model.optimizer.step()
+            # self.model.optimizer.zero_grad(set_to_none=True)
             total_loss += loss
 
             if self.use_tensorboardX:
@@ -245,13 +264,14 @@ class Trainer_SDS(object):
         self.log(f"==> Finished Epoch {self.epoch}. average_loss {average_loss}")
     def train_step(self, data):
         rgbs, mask, h, w, R, T, fx, fy, pose, index, cloth_f, cloth_b, clip_f, clip_b, name = data
+        body = self.model.human_body
 
-        pred_rgb,outputs,_ = self.render(data,train=True)
+        pred_rgb, outputs, _ = self.render(data,train=True,cloth=True)
         # pose_img, cloth_mask, ori_rgb,mask_p,key_points = self.addition_real_time(pred_global_rgb,index)
-        pose_img, cloth_mask, ori_rgb,mask_p,key_points = self.addition[str(index[0])]
-
+        pose_img, cloth_mask, ori_rgb, mask_p, key_points = self.addition[str(index[0])]
+        # outputs = self.model.render(cur_cam,invert_bg_color=False)
         # cloth_mask
-        human_pred = pred_rgb * (cloth_mask < 0.5)
+        # human_pred = pred_rgb * (cloth_mask < 0.5)
         rgbs = ori_rgb
         loss = l1_loss(pred_rgb, rgbs)
         # pred_rgb.retain_grad()
@@ -259,14 +279,42 @@ class Trainer_SDS(object):
         loss_bending = 0
         loss_strain = 0
         loss_gravity = 0
-        # loss_strain = stretching_energy(self.model._xyz.unsqueeze(0), self.cloth)
+        loss_collision = 0
+        # loss_strain = stretching_energy(self.model._xyz.unsqueeze(0), self.cloth) #init = 0.6
         # loss_bending = bending_energy(self.model._xyz.unsqueeze(0), self.cloth)
         # loss_gravity = gravitational_energy(self.model._xyz.unsqueeze(0), self.cloth.v_mass)
+        eps = 5e-3 if self.epoch < 100 else 2e-3
+        loss_collision = collision_penalty(self.model._xyz.unsqueeze(0), body.vb, body.nb, eps=eps)
+        loss_lapace = laplacian_smooth_loss(self.model._xyz, self.model.mesh_faces)
+        # depth = outputs['depth']
+        # scales = outputs['scales']
+        # loss_inside = compute_norm_similarity(self.model.inside, self.model._rotation)
+        # face_normals = compute_face_normals(self.model._xyz, self.model.cano_faces)
+        # face_neighbors = self.model.face_neighbors
+        # neighbor_normals = face_normals[face_neighbors]  # (N, k, 3), k=3
+        # normal_dot = face_normals.unsqueeze(1) * neighbor_normals  # 余弦相似度
+        # normal_dot = normal_dot.sum(-1)  # (N, k)
+        # norm_mean = normal_dot.mean(-1)  # (N,)
+        # losses_normal = (norm_mean - 1.0).abs().mean()
 
-        # collision_penalty(self.model._xyz.unsqueeze(0), self.cloth)
+        # neighbor_pts = self.model._xyz[face_neighbors]
+        # curr_offset = neighbor_pts - self.model._xyz[:, None]
+        # curr_offset_mag = torch.sqrt((curr_offset ** 2).sum(-1) + 1e-20)  # ||V_i - V_j||
+        # losses_iso = weighted_l2_loss_v1(curr_offset_mag, variables["neighbor_dist"], variables["neighbor_weight"])
 
+        loss_scale = scaling_loss(self.model.scaling_activation(self.model._scaling).unsqueeze(0))
+        #
+        # cloth = cloth_b if key_points[2, 0] > key_points[5, 0] else cloth_f
+        # loss_clip = img_clip_loss(pred_rgb, cloth,self.clip_model)
+        # loss += losses_normal + loss_scale + loss_collision + loss_strain
+
+
+        # loss += 0.5 * (loss_strain + loss_bending + loss_gravity + loss_collision)
         # return loss,outputs
-
+        # vertex_colors = torch.tensor(
+        #     ([[0, 128, 128, 255]] * self.model._xyz.shape[0] + [[255, 0, 0, 255]] * body.vb[0].shape[0]))
+        # v = torch.cat([self.model._xyz, body.vb[0]]).cpu().detach()
+        # trimesh.Trimesh(v, vertex_colors=vertex_colors).export('/home/jian/img/asd.obj')
         loss = self.guidance.train_step(pred_rgb=pred_rgb, cloth_f=cloth_f,
                                         cloth_b=cloth_b,
                                         mask=cloth_mask,
@@ -280,8 +328,19 @@ class Trainer_SDS(object):
                                         mask_p=mask_p,
                                         global_step=self.global_step,
                                         ori_rgb=rgbs,key_points=key_points)
-        # loss = 0
-        loss += 0.5 * (loss_strain + loss_bending + loss_gravity)
+        # return loss,outputs
+
+        # physical_loss
+        # loss += 0.5 * (loss_strain + loss_bending + loss_gravity + loss_collision)
+
+        # scales = torch.stack([scales],dim=0)
+        # loss_scale = torch.mean(scales[-self.model.num_cloth_gauss:],dim=-1).mean()
+
+        # loss_tv = tv_loss(pred_rgb.unsqueeze(0)) + tv_loss(depth.unsqueeze(0))
+        loss_tv = 0
+        # loss += loss + 1.0 * loss_tv + 1.0 * loss_scale
+
+        # loss += 10*losses_normal + loss_scale + 0.1 * loss_collision + loss_tv + loss_strain + loss_clip
         # depth = torch.stack([pred_depths],dim=0)
         # masked_ori = (cloth_mask<0.5)*ori_rgb
         # masked_pred = (cloth_mask<0.5)*pred_rgb
@@ -293,18 +352,16 @@ class Trainer_SDS(object):
         # loss = loss + masked_loss + tv_c_loss + tv_d_loss
         # # loss = gamma * loss_sds_global + (1 - gamma) * loss_sds_global
 
+        loss = loss_scale+loss+loss_collision+loss_lapace
         def _hook(grad):
             # clip_value = get_clip_value(iteration, 2000, opt.clip_value, opt.clip_value * 3)
-            clip_value = 0.3 #0.05
+            clip_value = 0.05 #0.05
             scale = clip_value / grad.abs()
             scale = torch.clamp(scale, max=1.0)
             min_scale = torch.amin(scale, dim=[1], keepdim=True)
             grad_ = grad * min_scale
-            grad_ = grad_ * (cloth_mask) + (grad_ * 0.1) * (1 - cloth_mask)
+            grad_ = grad_ * (cloth_mask) + (grad_ * 0.3) * (1 - cloth_mask)
             return grad_
-
-        scales =torch.stack([self.model.get_scaling],dim=0)
-        loss_scale = torch.mean(scales,dim=-1).mean()
         def _hook_1(grad):
             scale = 0.2 * loss_scale / grad.abs() #0.01
             scale = torch.clamp(scale, max=1.0)
@@ -312,17 +369,19 @@ class Trainer_SDS(object):
             grad_ = grad * min_scale
             return grad_
 
-        # pred_rgb.register_hook(_hook)
+        pred_rgb.register_hook(_hook)
         # depth.register_hook(_hook_1)
 
         return loss,outputs
     def evaluate(self, loader):
         for data in loader:
-            preds, _,_ = self.render(data)
+            preds, _,_ = self.render(data,cloth=True)
             os.makedirs(os.path.join("/home/jian/img",'coarse',self.workspace.split('/')[-2], self.time_stamp, ), exist_ok=True)
             transforms.ToPILImage()(preds).save(os.path.join("/home/jian/img",'coarse',self.workspace.split('/')[-2], self.time_stamp, f"{self.global_step}.jpg"))
-
-    def render(self, data, mask=None,train=False):
+            # mesh_dir = os.path.join("/home/jian/img",'mesh',self.workspace.split('/')[-2], self.time_stamp, )
+            # os.makedirs(mesh_dir, exist_ok=True)
+            # show.oneMesh(self.model._xyz,self.model.cano_faces,path = os.path.join(mesh_dir,f"{self.global_step}.obj"))
+    def render(self, data, mask=None,train=False,cloth=False):
 
         rgbs, _, h, w, R, T, fx, fy, pose, index, cloth_f, cloth_b, clip_f, clip_b, name = data
 
@@ -346,7 +405,8 @@ class Trainer_SDS(object):
             self.near,
             self.far
         )
-        outputs = render(cur_cam, self.model, bg_color = self.bg_color, invert_bg_color=True, mask=mask, train = train)
+        # outputs = render(cur_cam, self.model, bg_color = self.bg_color, mask=mask)
+        outputs = render2d(self.model, cur_cam, bg_color = self.bg_color,cloth=cloth)
 
 
         return outputs['image'], outputs,index
@@ -394,6 +454,12 @@ class Trainer_SDS(object):
 
     def get_addition(self, index):
 
+        # pose_img = Image.open(os.path.join(self.workspace.replace("female_4","male_3"), "pose_img", f"{index}.jpg"))
+        # cloth_mask = Image.open(os.path.join(self.workspace.replace("female_4","male_3"), "cloth_mask", f"{index}.jpg"))
+        # ori_rgb = Image.open(os.path.join(self.workspace.replace("female_4","male_3"), "ori_rgb", f"{index}.jpg"))
+        # mask_p = Image.open(os.path.join(self.workspace.replace("female_4","male_3"), "cloth_mask2", f"{index}.jpg"))
+        # with open(os.path.join(self.workspace.replace("female_4","male_3"), "key_points", f"{index}.json"), 'r') as json_file:
+        #     key_points = json.load(json_file)
         pose_img = Image.open(os.path.join(self.workspace, "pose_img", f"{index}.jpg"))
         cloth_mask = Image.open(os.path.join(self.workspace, "cloth_mask", f"{index}.jpg"))
         ori_rgb = Image.open(os.path.join(self.workspace, "ori_rgb", f"{index}.jpg"))

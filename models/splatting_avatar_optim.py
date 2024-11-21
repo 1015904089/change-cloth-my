@@ -91,8 +91,8 @@ class SplattingAvatarOptimizer(LossBase):
             })
 
         self.optimizer = torch.optim.Adam(l, lr=5e-4, eps=1e-15)
-        model.xyz_gradient_accum = torch.zeros((model._xyz_form_mesh_verts.shape[0], 1), device='cuda')
-        model.denom = torch.zeros((model._xyz_form_mesh_verts.shape[0], 1), device='cuda')
+        model.xyz_gradient_accum = torch.zeros((model.get_xyz.shape[0], 1), device='cuda')
+        model.denom = torch.zeros((model.get_xyz.shape[0], 1), device='cuda')
         model.percent_dense = getattr(optimizer_config, 'percent_dense', 0.01)
         model.optimizer = self.optimizer
 
@@ -251,10 +251,19 @@ class SplattingAvatarOptimizer(LossBase):
         grads[grads.isnan()] = 0.0
 
         # if model.config.get('max_n_gauss', -1) <= 0 or model.get_xyz.shape[0] < model.config.max_n_gauss:
+
+        # self.prune_zero_grad(grads)
+
         self.densify_and_clone(grads, max_grad, extent)
         self.densify_and_split(grads, max_grad, extent)
 
         self.prune(min_opacity, extent, max_screen_size)
+
+
+    def prune_zero_grad(self, grads):
+        prune_mask = torch.where(torch.norm(grads, dim=-1) == 0., True, False)
+        self.prune_points(prune_mask)
+        torch.cuda.empty_cache()
 
     def prune(self, min_opacity, extent, max_screen_size):
         model = self.gs_model
@@ -300,7 +309,7 @@ class SplattingAvatarOptimizer(LossBase):
                 # size_threshold = None
                 self.densify_and_prune(opt.densify_grad_threshold, opt.min_opacity, 
                                        cameras_extent, size_threshold)
-            
+                self.opacity_as_one()
             # if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
             # if opacity_reset_interval > 0 and (iteration - opacity_reset_iter) % opacity_reset_interval == 0:
             #     self.reset_opacity()
@@ -352,3 +361,7 @@ class SplattingAvatarOptimizer(LossBase):
 
         return pc_dir
 
+    def opacity_as_one(self):
+        opacity = torch.ones_like(self.gs_model._opacity)*10.0
+        self.gs_model._opacity = nn.Parameter(opacity)
+        self.gs_model._opacity.requires_grad = False

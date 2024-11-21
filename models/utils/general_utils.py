@@ -15,6 +15,7 @@ from datetime import datetime
 import numpy as np
 import random
 import cv2
+from collections import defaultdict
 
 def inverse_sigmoid(x):
     return torch.log(x/(1-x))
@@ -207,3 +208,52 @@ def retrieve_verts_barycentric(vertices, faces, fidxs, barys):
         raise NotImplementedError
     
     return sample_verts
+
+def find_adjacent_faces(faces, k=3):
+    # Create a dictionary to store faces sharing the same edge
+    edge_faces = defaultdict(list)
+
+    # Populate the dictionary with edges and corresponding face indices
+    for i, face in enumerate(faces):
+        for j in range(3):
+            # Create an edge as a tuple of vertex indices
+            edge = tuple(sorted([face[j], face[(j + 1) % 3]]))
+            edge_faces[edge].append(i)
+
+    # Create a dictionary to store adjacent faces
+    adjacent_faces = defaultdict(list)
+
+    # Find adjacent faces by shared edges
+    for edge, face_indices in edge_faces.items():
+        for face_idx in face_indices:
+            face_neighbors = face_indices.copy()
+            face_neighbors.remove(face_idx)
+            adjacent_faces[face_idx].extend(face_neighbors)
+
+    # Remove each face from its own adjacency list
+    for face_index, neighbors in adjacent_faces.items():
+        if len(neighbors) > k:
+            adjacent_faces[face_index] = np.random.choice(neighbors, k, replace=False)
+        elif len(neighbors) < k:
+            adjacent_faces[face_index].append(face_index)
+            adjacent_faces[face_index] = np.random.choice(neighbors, k, replace=True)
+    adjacent_faces = [adjacent_faces[i] for i in range(len(faces))]
+    adjacent_faces = np.array(adjacent_faces)
+    return adjacent_faces
+def compute_face_normals(vertices, faces):
+    v1 = vertices[faces[:, 0]]
+    v2 = vertices[faces[:, 1]]
+    v3 = vertices[faces[:, 2]]
+    e1 = v2 - v1  # Edge 1
+    e2 = v3 - v2  # Edge 2
+    face_normals = torch.cross(e1, e2, dim=1)
+    face_normals = face_normals / torch.norm(face_normals, dim=1, keepdim=True)
+    return face_normals
+
+def compute_face_barycenters(vertices, faces):
+    # Compute the barycenter of each face
+    v1 = vertices[faces[:, 0]]
+    v2 = vertices[faces[:, 1]]
+    v3 = vertices[faces[:, 2]]
+    face_barycenters = (v1 + v2 + v3) / 3
+    return face_barycenters

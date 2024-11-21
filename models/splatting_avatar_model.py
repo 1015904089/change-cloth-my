@@ -20,8 +20,8 @@ from .gauss_base import GaussianBase, to_abs_path, to_cache_path
 
 
 # standard 3dgs
-class SplattingAvatarModel(GaussianBase):
-    def __init__(self, config=None,
+class TwoDSplattingAvatarModel(GaussianBase):
+    def __init__(self, config,
                  device=torch.device('cuda'),
                  verbose=False):
         super().__init__()
@@ -61,7 +61,7 @@ class SplattingAvatarModel(GaussianBase):
     def get_xyz(self):
         if self.config.xyz_as_uvd:
             # uv -> self.sample_bary -> self.base_normal --(d)--> xyz
-            xyz = self.base_normal * self._xyz[..., -1:] # self.base_normal.norm(dim=1) = [1,1,1,1,1....]
+            xyz = self.base_normal * self._xyz[..., -1:]
             return self.base_xyz + xyz
         else:
             return self._xyz
@@ -94,7 +94,11 @@ class SplattingAvatarModel(GaussianBase):
 
     @property
     def get_rotation(self):
-        return self.rotation_activation(quaternion_multiply(self.base_quat, self._rotation))
+        try:
+            _rotation = self.rotation_activation(quaternion_multiply(self.base_quat, self._rotation))
+        except:
+            _rotation = self.rotation_activation(self._rotation)
+        return _rotation
 
     @property
     def get_rotation_embed(self):
@@ -135,45 +139,7 @@ class SplattingAvatarModel(GaussianBase):
             '_features_rest': self._features_rest.detach().to(device),
             '_opacity': self._opacity.detach().to(device),
         }
-    def capture(self):
-        return (
-            self.active_sh_degree,
-            self._xyz,
-            self._features_dc,
-            self._features_rest,
-            self._scaling,
-            self._rotation,
-            self._opacity,
-            self.max_radii2D,
-            self.xyz_gradient_accum,
-            self.denom,
-        )
-    def update_learning_rate(self, iteration):
-        ''' Learning rate scheduling per step '''
-        for param_group in self.optimizer.param_groups:
-            if param_group["name"] == "xyz":
-                lr = self.xyz_scheduler_args(iteration)
-                param_group['lr'] = lr
-                return lr
-        # if iteration>200:
-    def training_setup(self, training_args):
-        self.percent_dense = training_args.percent_dense
-        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-        l = [
-            {'params': [self._xyz], 'lr': training_args.position_lr_init, "name": "xyz"},
-            {'params': [self._features_dc], 'lr': training_args.feature_lr, "name": "f_dc"},
-            {'params': [self._features_rest], 'lr': training_args.feature_lr / 20.0, "name": "f_rest"},
-            {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
-            {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
-            {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
-        ]
 
-        self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
-        self.xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init,
-                                                    lr_final=training_args.position_lr_final,
-                                                    lr_delay_mult=training_args.position_lr_delay_mult,
-                                                    max_steps=training_args.iters * 80)
     def set_params(self, params):
         if '_xyz' in params:
             self._xyz = params['_xyz'].to(self.device)
@@ -205,12 +171,12 @@ class SplattingAvatarModel(GaussianBase):
     ##################################################
     def setup_config(self, config):
         self.config = config
-        self.max_sh_degree = getattr(config, 'sh_degree', 0)
+        self.max_sh_degree = getattr(config,'sh_degree', 0)
 
         # use _xyz as variables for uvd
         # enabling uvd representation of SplattingAvatar
-        self.config.xyz_as_uvd = getattr(config, 'xyz_as_uvd', True)
-        self.config.with_mesh_scaling = getattr(config, 'with_mesh_scaling', False)
+        self.config.xyz_as_uvd = getattr(config,'xyz_as_uvd', True)
+        self.config.with_mesh_scaling = getattr(config,'with_mesh_scaling', False)
 
     def create_from_pcd(self, pcd: BasicPointCloud):
         fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().to(self.device)
@@ -222,11 +188,10 @@ class SplattingAvatarModel(GaussianBase):
         print("Number of points at initialisation : ", fused_point_cloud.shape[0])
 
         dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().to(self.device)), 0.0000001)
-        scales = torch.log(torch.sqrt(dist2))[..., None].repeat(1, 3)
-        rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
-        rots[:, 0] = 1
+        scales = torch.log(torch.sqrt(dist2))[..., None].repeat(1, 2)
+        rots = torch.rand((fused_point_cloud.shape[0], 4), device="cuda")
 
-        opacities = inverse_sigmoid(0.5 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
+        opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
 
         self._xyz = fused_point_cloud
         self._features_dc = features[:, :, 0:1].transpose(1, 2).contiguous()
@@ -359,7 +324,8 @@ class SplattingAvatarModel(GaussianBase):
             torch.max(self.get_scaling_cano, dim=1).values > self.percent_dense * scene_extent)
 
         stds = self.get_scaling_cano[selected_pts_mask].repeat(N, 1)
-        means = torch.zeros((stds.size(0), 3), device='cuda')
+        stds = torch.cat([stds, 0 * torch.ones_like(stds[:, :1])], dim=-1)
+        means = torch.zeros_like(stds, device='cuda')
         samples = torch.normal(mean=means, std=stds)
         rots = build_rotation(self.get_rotation_cano[selected_pts_mask]).repeat(N, 1, 1)
         new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz_cano[selected_pts_mask].repeat(N, 1)
@@ -383,7 +349,7 @@ class SplattingAvatarModel(GaussianBase):
             uv = self.sample_bary[selected_pts_mask, :2].repeat(N, 1)
             d = self._xyz[selected_pts_mask, -1:].repeat(N, 1)
 
-            if not self.config.skip_triangle_walk:
+            if not self.config.get('skip_triangle_walk', False):
                 fidx, uv = self.phongsurf.update_corres_spt(new_xyz, None, fidx, uv)
 
             bary = torch.concat([uv, 1.0 - uv[:, 0:1] - uv[:, 1:2]], dim=-1)

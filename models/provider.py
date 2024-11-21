@@ -74,6 +74,7 @@ class SphericalSamplingGSDataset:
         self.view = view
         self.R_path = R_path
         self.data_dir = opt.data_path
+        # self.data_dir = self.data_dir.replace("female","male")
         self.sd = sd
         self.refine =refine
         if self.view == "fb":
@@ -251,9 +252,14 @@ class SphericalSamplingGSDataset:
     def dataloader(self):
         if self.training:
             print(self.opt.batch_size)
-            loader = DataLoader(self.index, batch_size=self.opt.batch_size, collate_fn=self.collate,
-                                shuffle=self.training,
-                                num_workers=0)
+            if self.view == "fb":
+                loader = DataLoader(self.index, batch_size=self.opt.batch_size, collate_fn=self.collate,
+                                    shuffle=self.training,
+                                    num_workers=0)
+            else:
+                loader = DataLoader(self.index, batch_size=self.opt.batch_size, collate_fn=self.collate,
+                                    shuffle=self.training,
+                                    num_workers=0)
         else:
             loader = DataLoader(list(range(1)), batch_size=1, collate_fn=self.collate,
                                 shuffle=False, num_workers=0)

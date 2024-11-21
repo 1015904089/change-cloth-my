@@ -307,15 +307,15 @@ class Cloth_from_NP:
         return self.v_weights
 
 class Body:
-    def __init__(self, faces):
+    def __init__(self, faces=None):
         self.f = faces
         self.vb = None
         self.nb = None
 
-    def update_body(self, verts_batch):
-        self.vb = verts_batch
-        self.nb = self.get_verts_normal(verts_batch)
-
+    def update_body(self, verts_batch,norm_batch):
+        self.vb = verts_batch.unsqueeze(0)
+        # self.nb = self.get_verts_normal(verts_batch)
+        self.nb = norm_batch.unsqueeze(0)
     def get_verts_normal(self, verts_batch):
         # verts_batch: [batch_size, N, 3]
         nb = []

@@ -4,23 +4,27 @@
 import os
 import torch
 import torch.nn.functional as thf
+import torch.nn as nn
 import numpy as np
 from pathlib import Path
 import json
 from models import libcore
 from simple_phongsurf import PhongSurfacePy3d
 from models.utils.sh_utils import eval_sh, RGB2SH
-from models.utils.general_utils import inverse_sigmoid, get_expon_lr_func, build_rotation
+from models.utils.general_utils import inverse_sigmoid, get_expon_lr_func, build_rotation, find_adjacent_faces,compute_face_normals
 from models.utils.data_utils import sample_bary_on_triangles, retrieve_verts_barycentric
 from models.utils.map import PerVertQuaternion
-from models.utils.graphics_utils import BasicPointCloud
+from models.utils.graphics_utils import BasicPointCloud,construct_rotation_matrix
 from simple_knn._C import distCUDA2
 from pytorch3d.transforms import quaternion_multiply
 from .gauss_base import GaussianBase, to_abs_path, to_cache_path
 import pytorch3d.structures.meshes as py3d_meshes
-from models.splatting_avatar_model import SplattingAvatarModel
+from models.splatting_avatar_model import TwoDSplattingAvatarModel as SplattingAvatarModel
 from models.gauss_base import GaussianBase
 import copy
+from models.snug.snug_class import Body
+
+import trimesh
 # standard 3dgs
 class SplattingClothModel(GaussianBase):
     def __init__(self, config,
@@ -41,6 +45,7 @@ class SplattingClothModel(GaussianBase):
         # for splatting avatar
         self.register_buffer('sample_fidxs', torch.Tensor(0))
         self.register_buffer('sample_bary', torch.Tensor(0))
+        self.human_body=None
 
         if config is not None:
             self.setup_config(config)
@@ -67,9 +72,10 @@ class SplattingClothModel(GaussianBase):
             xyz = self.base_normal_cano * self._xyz_form_mesh_verts[..., :]
             _xyz = self.base_xyz_cano + xyz
         else:
-            _xyz = retrieve_verts_barycentric(self._xyz, self.cano_faces,     # 优化参数xyz插值
-                                   self.sample_fidxs, self.sample_bary)
-        return torch.cat((self.human_model.get_xyz_cano, _xyz), dim=0)
+            # _xyz = retrieve_verts_barycentric(self._xyz, self.cano_faces,     # 优化参数xyz插值
+            #                        self.sample_fidxs, self.sample_bary)
+            _xyz = self._xyz
+        return  _xyz
     @property
     def get_xyz(self):
         if self.config.xyz_as_uvd:
@@ -79,7 +85,7 @@ class SplattingClothModel(GaussianBase):
         else:
             # _xyz= self._xyz
             _xyz = retrieve_verts_barycentric(self._xyz, self.cano_faces, self.sample_fidxs, self.sample_bary)
-        return torch.cat((self.human_model.get_xyz, _xyz), dim=0)
+        return  _xyz
 
 
 
@@ -111,12 +117,15 @@ class SplattingClothModel(GaussianBase):
     @property
     def get_rotation_cano(self):
         _rotation = self.rotation_activation(self._rotation)
-        return torch.cat((self.human_model.get_rotation_cano, _rotation), dim=0)
+        return _rotation
 
     @property
     def get_rotation(self):
-        _rotation =  self.rotation_activation(quaternion_multiply(self.base_quat, self._rotation))
-        return torch.cat((self.human_model.get_rotation, _rotation), dim=0)
+        try:
+            _rotation =  self.rotation_activation(quaternion_multiply(self.base_quat, self._rotation))
+        except:
+            _rotation =  self.get_rotation_cano
+        return  _rotation
 
     @property
     def get_rotation_embed(self):
@@ -129,7 +138,7 @@ class SplattingClothModel(GaussianBase):
     @property
     def get_scaling_cano(self):
         _scaling = self.scaling_activation(self._scaling)
-        return torch.cat((self.human_model.get_scaling_cano, _scaling), dim=0)
+        return  _scaling
 
     @property
     def get_scaling(self):
@@ -138,19 +147,19 @@ class SplattingClothModel(GaussianBase):
             _scaling = self.scaling_activation(self._scaling * scaling_alter)
         else:
             _scaling = self.scaling_activation(self._scaling)
-        return torch.cat((self.human_model.get_scaling, _scaling), dim=0)
+        return  _scaling
 
     @property
     def get_features(self):
         features_dc = self._features_dc
         features_rest = self._features_rest
         _features = torch.cat((features_dc, features_rest), dim=1)
-        return torch.cat((self.human_model.get_features, _features), dim=0)
+        return  _features
 
     @property
     def get_opacity(self):
         _opacity = self.opacity_activation(self._opacity)
-        return torch.cat((self.human_model.get_opacity, _opacity), dim=0)
+        return  _opacity
 
     def get_params(self, device='cpu'):
         return {
@@ -255,12 +264,15 @@ class SplattingClothModel(GaussianBase):
         self.cano_norms = norms
         self.cano_faces = faces
 
+        self.face_neighbors = torch.from_numpy(find_adjacent_faces(self.cano_faces.cpu().numpy(), 3)).to(self.cano_faces)
+
+
         self.mesh_verts = self.cano_verts
         self.mesh_norms = self.cano_norms
 
         # sample on mesh
         if sample_fidxs is None or sample_bary is None:
-            num_samples = 30000
+            num_samples = 50000
             sample_fidxs, sample_bary = sample_bary_on_triangles(faces.shape[0], num_samples)
         self.sample_fidxs = sample_fidxs.to(self.device)
         self.sample_bary = sample_bary.to(self.device)
@@ -292,21 +304,22 @@ class SplattingClothModel(GaussianBase):
         print("Number of colors at initialisation : ", colors.shape[0])
 
         dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(points)).float().to(self.device)), 0.0000001)
-        scales = torch.log(torch.sqrt(dist2))[..., None].repeat(1, 3)
-        rots = torch.zeros((sample_verts.shape[0], 4), device="cuda")
-        rots[:, 0] = 1
+        scales = torch.log(torch.sqrt(dist2))[..., None].repeat(1, 2)
+        # rots = torch.zeros((sample_verts.shape[0], 4), device="cuda")
+        # rots[:, 0] = 1
+        # 将插值获得的法向量作为旋转方向
+        rots = construct_rotation_matrix(self.base_normal)
 
         opacities = inverse_sigmoid(0.99 * torch.ones((sample_verts.shape[0], 1), dtype=torch.float, device="cuda"))
 
-        # self._xyz = fused_point_cloud  # 将_XYZ进行插值
-        self._xyz = self.cano_verts
-        self._features_dc = features[:, :, 0:1].transpose(1, 2).contiguous()
-        self._features_rest = features[:, :, 1:].transpose(1, 2).contiguous()
-        self._scaling = scales
-        self._rotation = rots
-        self._opacity = opacities
-        self.max_radii2D = torch.zeros((self._opacity.shape[0]), device="cuda")
-        self.active_sh_degree = self.max_sh_degree
+        self._xyz = nn.Parameter(copy.copy(self.cano_verts).requires_grad_(True))
+        self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
+        self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
+        self._scaling = nn.Parameter(scales.requires_grad_(True))
+        self._rotation = nn.Parameter(rots.requires_grad_(True))
+        self._opacity = nn.Parameter(opacities.requires_grad_(True))
+        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+
 
         # use _xyz as uvd
         if self.config.xyz_as_uvd:
@@ -329,14 +342,13 @@ class SplattingClothModel(GaussianBase):
         opacities = inverse_sigmoid(0.6 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
 
         # self._xyz = fused_point_cloud
-        self._xyz = self.cano_verts
-        self._features_dc = features[:, :, 0:1].transpose(1, 2).contiguous()
-        self._features_rest = features[:, :, 1:].transpose(1, 2).contiguous()
-        self._scaling = scales
-        self._rotation = rots
-        self._opacity = opacities
+        self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
+        self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
+        self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
+        self._scaling = nn.Parameter(scales.requires_grad_(True))
+        self._rotation = nn.Parameter(rots.requires_grad_(True))
+        self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
-        self.active_sh_degree = self.max_sh_degree
 
     def setup_canonical(self, cano_verts, cano_norms, cano_faces):
         self.cano_verts = cano_verts
@@ -349,21 +361,27 @@ class SplattingClothModel(GaussianBase):
         # phong surface for triangle walk
         self.phongsurf = PhongSurfacePy3d(cano_verts, cano_faces, cano_norms,
                                           outer_loop=2, inner_loop=50, method='uvd').to(self.device)
-    def init_human_model(self):
-        self.human_model = SplattingAvatarModel(device=self.device)
-    def create_human_model(self, pc_dir,cano_mesh):
-        config = copy.copy(self.config)
-        config.xyz_as_uvd=True
-        self.human_model.setup_config(config)
+
+
+
+    def load_human(self,cano_mesh,pc_dir = '/home/jian/peoplesnapshot/female-4-casual/output-splatting/@20241119-185737/point_cloud/iteration_14000/'):
+        human_config = copy.copy(self.config)
+        human_config.xyz_as_uvd=True
+
+        self.human_model = SplattingAvatarModel(human_config)
         ply_fn = os.path.join(pc_dir, 'point_cloud.ply')
         self.human_model.load_ply(ply_fn)
         embed_fn = os.path.join(pc_dir, 'embedding.json')
         self.human_model.load_from_embedding(embed_fn)
-        # cano_mesh_v2 = {
-        #     'mesh_verts':self.human_model.cano_verts,
-        #     'mesh_norms':self.human_model.cano_verts,
-        # }
         self.human_model.update_to_posed_mesh(cano_mesh)
+
+        select_mask = torch.where(self.human_model.get_opacity[:,0]>=0.6,True,False).to(torch.bool)
+        self.human_body = Body()
+        vert = self.human_model.get_xyz[select_mask]
+        norm = self.human_model.base_normal[select_mask]
+        self.human_body.update_body(vert, norm)
+
+
 
     def update_to_posed_mesh(self, mesh=None):
         if mesh is not None:
@@ -452,7 +470,7 @@ class SplattingClothModel(GaussianBase):
         means = torch.zeros((stds.size(0), 3), device='cuda')
         samples = torch.normal(mean=means, std=stds)
         rots = build_rotation(self.get_rotation_cano[-self.num_cloth_gauss:][selected_pts_mask]).repeat(N, 1, 1)
-        new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz_cano[-self.num_cloth_gauss:][selected_pts_mask].repeat(N, 1)
+        new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[-self.num_cloth_gauss:][selected_pts_mask].repeat(N, 1)
         return selected_pts_mask, new_xyz.detach()
 
     def prepare_split_selected_to_new_xyz(self, selected_pts_mask, new_xyz, N):
@@ -503,12 +521,12 @@ class SplattingClothModel(GaussianBase):
                                               torch.max(self.get_scaling[-self.num_cloth_gauss:],
                                                         dim=1).values <= self.percent_dense * scene_extent)
 
-        new_xyz = self._xyz_form_mesh_verts[selected_pts_mask]
+        # new_xyz = self._xyz_form_mesh_verts[selected_pts_mask]
         new_scaling = self._scaling[selected_pts_mask]
         new_rotation = self._rotation[selected_pts_mask]
 
         cloneout = {
-            'new_xyz': new_xyz,
+            # 'new_xyz': new_xyz,
             'new_scaling': new_scaling,
             'new_rotation': new_rotation,
         }

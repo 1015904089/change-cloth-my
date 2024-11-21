@@ -198,7 +198,7 @@ def gravitational_energy(x, mass, g=9.81, return_average=True, shift_ground=Fals
     return U.sum(dim=-1)
 
 
-def collision_penalty(va, vb, nb, eps=2e-3, kcollision=2500):#250): # eps=2e-3 ????
+def collision_penalty(va, vb, nb, eps=2e-3, kcollision=2500,eps2 =2e-2):#250): # eps=2e-3 ????
     batch_size = va.shape[0]
     vec = va[:, :, None] - vb[:, None]
     dist = torch.sum(vec**2, dim=-1)
@@ -209,9 +209,10 @@ def collision_penalty(va, vb, nb, eps=2e-3, kcollision=2500):#250): # eps=2e-3 ?
     nb = torch.gather(nb, 1, closest_vertices)
 
     distance = (nb*(va - vb)).sum(dim=-1) 
-    interpenetration = torch.nn.functional.relu(eps - distance)
+    interpenetration_min = torch.nn.functional.relu(eps - distance)
+    interpenetration_max = torch.nn.functional.relu(distance - eps2)
 
-    return (interpenetration**3).sum() / batch_size * kcollision
+    return ((interpenetration_min**3).sum() + (interpenetration_max**3).sum()) / batch_size * kcollision
 
 def shrink_penalty(va, vb):
 

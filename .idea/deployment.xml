@@ -16,6 +16,20 @@
           </mappings>
         </serverdata>
       </paths>
+      <paths name="jian@172.23.161.134:22 password (3)">
+        <serverdata>
+          <mappings>
+            <mapping local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="vision@192.168.178.84:3466 password">
+        <serverdata>
+          <mappings>
+            <mapping local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
       <paths name="zhengjian@192.168.178.156:3466 password">
         <serverdata>
           <mappings>

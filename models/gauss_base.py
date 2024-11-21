@@ -204,4 +204,36 @@ class GaussianBase(nn.Module):
         self.init_gauss(xyz, features_dc, features_extra, opacities, scales, rots, 
                         init_params=init_params)
 
-    
+    def training_setup(self, training_args):
+        self.percent_dense = training_args.percent_dense
+        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+
+        self._xyz = self._xyz.detach().requires_grad_(True)
+        self._features_dc = self._features_dc.detach().requires_grad_(True)
+        self._features_rest = self._features_rest.detach().requires_grad_(True)
+        self._opacity = self._opacity.detach().requires_grad_(True)
+        self._scaling = self._scaling.detach().requires_grad_(True)
+        self._rotation = self._rotation.detach().requires_grad_(True)
+        l = [
+            {'params': [self._xyz], 'lr': training_args.position_lr_init, "name": "xyz"},
+            {'params': [self._features_dc], 'lr': training_args.feature_lr, "name": "f_dc"},
+            {'params': [self._features_rest], 'lr': training_args.feature_lr / 20.0, "name": "f_rest"},
+            {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
+            {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
+            {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
+        ]
+
+        self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
+        self.xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init ,
+                                                    lr_final=training_args.position_lr_final ,
+                                                    lr_delay_mult=training_args.position_lr_delay_mult,
+                                                    max_steps=training_args.position_lr_max_steps)
+
+    def update_learning_rate(self, iteration):
+        ''' Learning rate scheduling per step '''
+        for param_group in self.optimizer.param_groups:
+            if param_group["name"] == "xyz":
+                lr = self.xyz_scheduler_args(iteration)
+                param_group['lr'] = lr
+                return lr

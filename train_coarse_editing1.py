@@ -31,21 +31,21 @@ if __name__ == '__main__':
     parser.add_argument('--start_gamma', type=float, default=0.99, help="initial gamma value")
     parser.add_argument('--end_gamma', type=float, default=0.5, help="end gamma value")
     parser.add_argument('--points_times', type=int, default=1, help="repeat editing points x times")
-    parser.add_argument('--position_lr_init', type=float, default=0.0015, help="initial learning rate")
+    parser.add_argument('--position_lr_init', type=float, default=0.002, help="initial learning rate")
     parser.add_argument('--position_lr_final', type=float, default=0.00005, help="initial learning rate")
     parser.add_argument('--position_lr_delay_mult', type=float, default=0.01, help="initial learning rate")
     parser.add_argument('--position_lr_max_steps', type=float, default=5_000, help="initial learning rate")
     parser.add_argument('--feature_lr', type=float, default=0.05, help="initial learning rate")
     parser.add_argument('--feature_lr_after', type=float, default=0.02, help="initial learning rate")
-    parser.add_argument('--opacity_lr', type=float, default=0.05, help="initial learning rate")
+    parser.add_argument('--opacity_lr', type=float, default=0.00, help="0.05")
     parser.add_argument('--scaling_lr', type=float, default=0.005, help="initial learning rate")
-    parser.add_argument('--rotation_lr', type=float, default=0.001, help="initial learning rate")
+    parser.add_argument('--rotation_lr', type=float, default=0.001, help="0.001")
     parser.add_argument('--percent_dense', type=float, default=0.1, help="0.01")
-    parser.add_argument('--densification_interval', type=float, default=20)#200
-    parser.add_argument('--opacity_reset_interval', type=float, default=20)#2000
-    parser.add_argument('--densify_from_iter', type=float, default=50) #500
-    parser.add_argument('--densify_until_iter', type=float, default=800)
-    parser.add_argument('--densify_grad_threshold', type=float, default=0.0002, help="0.0002") #15
+    parser.add_argument('--densification_interval', type=float, default=100)#200
+    parser.add_argument('--opacity_reset_interval', type=float, default=100)#2000
+    parser.add_argument('--densify_from_iter', type=float, default=200) #500
+    parser.add_argument('--densify_until_iter', type=float, default=6000)
+    parser.add_argument('--densify_grad_threshold', type=float, default=0.2, help="0.0002") #15
     parser.add_argument('--min_opacity', type=float, default=0.005)
     parser.add_argument('--max_screen_size', type=float, default=20.0)
     parser.add_argument('--max_scale_size', type=float, default=0.05)
@@ -109,7 +109,7 @@ if __name__ == '__main__':
     parser.add_argument('--fovy_range', type=float, nargs='*', default=[-4.5, -4.5], help="test camera fovy range")
     parser.add_argument('--phi_range', type=float, nargs='*', default=[-180, 180], help="test camera fovy range")
     parser.add_argument('--theta_range', type=float, nargs='*', default=[90, 90], help="test camera fovy range")
-    parser.add_argument('--offset', type=float, nargs='*', default=[-0.1, 0, -5.3], help="test camera fovy range")
+    parser.add_argument('--offset', type=float, nargs='*', default=[-0.1, 0, -5.2], help="test camera fovy range")
     parser.add_argument('--ootd', type=bool, default=False, help="use amp mixed precision training")
     parser.add_argument("--sds", action='store_false', help="If reset color and size of the editing points")
     parser.add_argument("--mode", type=str, default="train", help="0:add new object, 1:edit existing object")
@@ -125,8 +125,11 @@ if __name__ == '__main__':
     # from models.network_3dgaussain import GSNetwork
     # from models.splatting_avatar_model import SplattingAvatarModel
     from models.splatting_cloth import SplattingClothModel
-    model = SplattingClothModel(opt, device)
-    # model = GPSNetwork(opt)
+    from models.gaussian_model import GaussianModel
+    from models.network_3dgaussain import GSNetwork
+    # model = SplattingClothModel(opt, device)
+    model = GaussianModel(sh_degree=0, opt=opt)
+    # model = GSNetwork(opt)
 
 
     valid_dataset = SphericalSamplingGSDataset(opt, device=device, type=opt.mode, H=1024,view = opt.view,
@@ -140,7 +143,7 @@ if __name__ == '__main__':
     guidance=None
     from models.sd import StableDiffusion
 
-    guidance = StableDiffusion(opt, device, base_path='/home/jian/IDM-VTON/result/checkpoint-4000/')
+    # guidance = StableDiffusion(opt, device, base_path='/home/jian/IDM-VTON/result/checkpoint-4000/')
     # guidance = StableDiffusion(opt, device, base_path='yisol/IDM-VTON')
 
 
